@@ -1,0 +1,12 @@
+gdown==6.1.0
+munch==4.0.0
+numpy==2.4.4
+pillow==12.2.0
+PyYAML==6.0.3
+scipy==1.18.0
+svgpathtools==1.7.2
+tensorboard==2.21.0
+tensorboard-data-server==0.7.2
+tensorboardX==2.6.5
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu

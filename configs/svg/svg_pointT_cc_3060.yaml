@@ -1,0 +1,156 @@
+# Doors, windows and walls on CubiCasa5K — single RTX 3060 (12GB).
+#
+# 3 classes + background: 0 door, 1 window, 2 wall, 3 background.
+#
+# Sizing (measured on this codebase, fp32, batch 1):
+#     700px / 800 queries   6.0 GB      512px / 400 queries   3.8 GB
+#     980px / 800 queries   7.8 GB      batch 2 @ 980px      ~14 GB (does not fit)
+# fp16 roughly halves the activation share, so 700px at batch 2 sits
+# comfortably inside 12GB.
+#
+# batch_size 2 x accumulate_steps 8 = effective batch 16, which is what the
+# learning rate below assumes and what the DPSS paper used (2 per GPU x 8 GPUs).
+# train.py scales lr from the effective batch, so leave both alone.
+#
+# class_weights is the change that matters most here. On CPU the model drifted
+# toward walls -- door IoU fell 37.5 -> 25.5 across one epoch while wall rose
+# 60.2 -> 68.0 -- because walls are 58.6% of labelled primitives against 22.0%
+# door and 19.4% window, so ignoring doors was simply cheaper. These are
+# sqrt-inverse-frequency weights computed from the training split: gentle enough
+# to avoid destabilising the loss, firm enough that dropping doors costs.
+#
+# use_layer_fusion stays off. The layer input must never be able to substitute
+# for the answer; see the note in dataset/taxonomy.py.
+#
+# LICENCE: CubiCasa5K is CC BY-NC 4.0 — research only, not for shipping.
+
+model:
+  in_channels: 10
+  semantic_classes: 3
+  use_layer_fusion: False
+  num_decoders: 3
+  dropout: 0.1
+  pre_norm: False
+  num_heads: 8
+  shared_decoder: True
+  dim_feedforward: 512
+  hidden_dim: 256
+  num_queries: 800
+  gauss_scale: 1.0
+  normalize_pos_enc: False
+  scalar: 1
+  dn_mask_noise_scale: 0.0
+  dn_label_noise_ratio: 0.2
+  vision:
+    dim: 64
+    backbone: "hrnet48"
+    yaml: "configs/svg/hrnet48.yaml"
+    pretrained: "svgnet/pretrained/hrnet_ocr_cocostuff_3965_torch04.pth"
+
+matcher:
+  cost_class: 2.
+  cost_mask: 7.
+  cost_dice: 5.
+  num_points: -1
+
+criterion:
+  num_classes: 3
+  eos_coef: 0.05
+  losses:
+    - "labels"
+    - "masks"
+  ignore_label: -1
+  # door, window, wall — sqrt-inverse frequency, normalised to mean 1
+  class_weights: [1.121, 1.192, 0.687]
+  num_points: -1
+  contrast:
+    num_classes: 4
+    stage: "Ua"
+    num_layers: 5
+    ftype: "f_out"
+    dist: "l2"
+    pos: "cnt"
+    contrast_func: "softnn"
+    sample: "label"
+    temperature: 2.0
+    weight: 8.0
+
+data:
+  train:
+    img_size: 700
+    type: 'svg'
+    num_classes: 3
+    data_root: 'dataset/cubicasa/json3'
+    repeat: 1
+    split: "train"
+    data_norm: "mean"
+    aug:
+      aug_prob: 0.3
+      hflip: True
+      vflip: True
+      color: True
+      rotate:
+        enable: False
+        angle: [-180,180]
+      rotate2: False
+      scale:
+        enable: False
+        ratio: [0.5,1.5]
+      shift:
+        enable: False
+        scale: [-0.5,0.5]
+      cutmix:
+        enable: False
+        queueK: 4
+        relative_shift: [-0.5,0.5]
+
+  test:
+    img_size: 700
+    type: 'svg'
+    num_classes: 3
+    data_root: 'dataset/cubicasa/json3'
+    repeat: 1
+    split: "test"
+    data_norm: "mean"
+    aug: False
+
+dataloader:
+  train:
+    batch_size: 2
+    num_workers: 6
+  test:
+    batch_size: 2
+    num_workers: 6
+
+optimizer:
+  type: 'AdamW'
+  lr: 0.0002
+  weight_decay: 0.1
+  weight_decay_embed: 0.1
+  decoder_multiplier: 1.0
+  clip_gradients_enabled: True
+  clip_gradients_type: "full_model"
+  clip_gradients_norm_type: 2.0
+  clip_gradients_value: 2.0
+
+scheduler:
+  type: 'cosine'
+  warmup_epochs: 3
+  min_lr: 1e-7
+
+fp16: True
+epochs: 60
+step_epoch: 2
+save_freq: 10
+save_interval_iters: 500
+pretrain: ''
+work_dir: './work_dirs/cc_3060'
+
+# batch 2 x 8 = effective 16, matching the learning rate above.
+accumulate_steps: 8
+
+# Stop when mIoU stops improving rather than always running 60 epochs.
+early_stop:
+  metric: miou
+  patience: 8
+  min_delta: 0.1

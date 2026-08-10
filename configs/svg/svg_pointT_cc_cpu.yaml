@@ -1,0 +1,153 @@
+# Doors, windows and walls on CubiCasa5K — CPU training.
+#
+# 3 classes + background: 0 door, 1 window, 2 wall, 3 background.
+#
+# CubiCasa's labels are human annotations, not derived from anything the model
+# can see, so there is no shortcut of the kind that made the US-layer experiment
+# meaningless. use_layer_fusion stays off for the same reason: the layer input
+# should never be able to stand in for the answer.
+#
+# CubiCasa drawings are small (median 738 primitives, max ~2,900), so each step
+# is cheap. Class balance is also kinder than the US sheets: 4.7% door, 4.0%
+# window, 12.5% wall, 78.8% background, versus 3.9/1.9/5.6/88.7.
+#
+# LICENCE: CC BY-NC 4.0 — research only, must not ship commercially.
+
+model:
+  in_channels: 10
+  semantic_classes: 3
+  #decoder
+  num_decoders: 3
+  dropout: 0.1
+  pre_norm: False
+  num_heads: 8
+  shared_decoder: True
+  dim_feedforward: 512
+  hidden_dim: 256
+  num_queries: 50
+  gauss_scale: 1.0
+  normalize_pos_enc: False
+  #dn
+  scalar: 1
+  dn_mask_noise_scale: 0.0
+  dn_label_noise_ratio: 0.2
+  vision:
+    dim: 64
+    backbone: "hrnet48"
+    yaml: "configs/svg/hrnet48.yaml"
+    pretrained: "svgnet/pretrained/hrnet_ocr_cocostuff_3965_torch04.pth"
+
+matcher:
+  cost_class: 2.
+  cost_mask: 7.
+  cost_dice: 5.
+  num_points: -1
+
+criterion:
+  num_classes: 3
+  eos_coef: 0.05
+  losses:
+    - "labels"
+    - "masks"
+  ignore_label: -1
+  class_weights: -1
+  num_points: -1
+  contrast:
+    num_classes: 4 # bg+fg
+    stage: "Ua"
+    num_layers: 5
+    ftype: "f_out"
+    dist: "l2"
+    pos: "cnt"
+    contrast_func: "softnn"
+    sample: "label"
+    temperature: 2.0
+    weight: 8.0
+
+data:
+  train:
+    img_size: 192
+    type: 'svg'
+    num_classes: 3
+    data_root: 'dataset/cubicasa/json3'
+    repeat: 1
+    split: "train_cpu"
+    data_norm: "mean"
+    aug:
+      aug_prob: 0.3
+      hflip: True
+      vflip: True
+      color: True
+
+      rotate:
+        enable: False
+        angle: [-180,180]
+      rotate2: False
+
+      scale:
+        enable: False
+        ratio: [0.5,1.5]
+
+      shift:
+        enable: False
+        scale: [-0.5,0.5]
+
+      cutmix:
+        enable: False
+        queueK: 4
+        relative_shift: [-0.5,0.5]
+
+  test:
+    img_size: 192
+    type: 'svg'
+    num_classes: 3
+    data_root: 'dataset/cubicasa/json3'
+    repeat: 1
+    split: "val_cpu"
+    data_norm: "mean"
+    aug: False
+
+dataloader:
+  train:
+    batch_size: 1
+    num_workers: 2
+  test:
+    batch_size: 1
+    num_workers: 2
+
+optimizer:
+  type: 'AdamW'
+  lr: 0.0002
+  weight_decay: 0.1
+  weight_decay_embed: 0.1
+  decoder_multiplier: 1.0
+  clip_gradients_enabled: True
+  clip_gradients_type: "full_model"
+  clip_gradients_norm_type: 2.0
+  clip_gradients_value: 2.0
+
+scheduler:
+  type: 'cosine'
+  warmup_epochs: 3
+  min_lr: 1e-7
+
+fp16: False
+epochs: 12
+step_epoch: 2
+save_freq: 1
+pretrain: ''   # set to work_dirs/cubicasa/best.pth for the warm start
+work_dir: './work_dirs/cc_cpu'
+
+# 8 GPUs x batch 2 = effective batch 16 already; no accumulation needed.
+accumulate_steps: 16
+
+# Rolling checkpoint about every 10 minutes, so a crash costs little.
+save_interval_iters: 200
+
+# Stop once the score stops improving, instead of always running every epoch.
+# metric: miou (moves from epoch 1) or pq (can sit at 0 for a long time on this
+# class balance, which would trigger a false stop). Also selects best.pth.
+early_stop:
+  metric: miou
+  patience: 4
+  min_delta: 0.2

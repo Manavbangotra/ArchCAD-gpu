@@ -1,0 +1,168 @@
+# Doors, windows and walls on US construction drawings — CPU-only training.
+#
+# 3 classes + background: 0 door, 1 window, 2 wall, 3 background. Rooms are
+# deliberately absent: no planset in the corpus contains room geometry (where an
+# A-ROOM layer exists it holds name tags, 32 short segments against 467 wall
+# segments on the same sheet). A room is the space enclosed by walls, and those
+# boundary lines *are* the walls, so room and wall would compete for the same
+# primitives. Derive rooms geometrically from detected walls if they are wanted.
+#
+# Sized for ~20 epochs in roughly a day on 4 CPU cores. Measured step times at
+# 50 queries, batch 1, HRNet-48:
+#     192px / 2,048 pts   2.52 s      192px / 5,500 pts   4.15 s
+#     256px / 3,000 pts   3.21 s      384px / 6,000 pts   6.12 s
+#
+# HRNet-48 is kept over the smaller HRNet-18 (2.18 s at 256px) because only
+# HRNet-48 has COCO-Stuff pretrained weights here; over so few epochs a useful
+# starting point beats raw speed.
+#
+# Trains on split "train_cpu": the 1,055 tiles with >=200 door/window primitives
+# and <=12,000 total, which keeps an epoch near 1 hour. Validates on "val_cpu",
+# 150 tiles spanning all 5 held-out buildings — full 632-tile evaluation is run
+# once at the end, not every epoch.
+#
+# Judge this on door and window IoU, not overall accuracy: doors are 3.9% of
+# primitives and windows 1.9%, so predicting background everywhere already scores
+# about 88%.
+#
+# pretrain is empty on purpose — no CubiCasa, so this model carries no CC BY-NC
+# constraint and stays licence-clean.
+
+model:
+  in_channels: 10
+  semantic_classes: 3
+  #decoder
+  num_decoders: 3
+  dropout: 0.1
+  pre_norm: False
+  num_heads: 8
+  shared_decoder: True
+  dim_feedforward: 512
+  hidden_dim: 256
+  num_queries: 50
+  gauss_scale: 1.0
+  normalize_pos_enc: False
+  #dn
+  scalar: 1
+  dn_mask_noise_scale: 0.0
+  dn_label_noise_ratio: 0.2
+  vision:
+    dim: 64
+    backbone: "hrnet48"
+    yaml: "configs/svg/hrnet48.yaml"
+    pretrained: "svgnet/pretrained/hrnet_ocr_cocostuff_3965_torch04.pth"
+
+matcher:
+  cost_class: 2.
+  cost_mask: 7.
+  cost_dice: 5.
+  num_points: -1
+
+criterion:
+  num_classes: 3
+  eos_coef: 0.05
+  losses:
+    - "labels"
+    - "masks"
+  ignore_label: -1
+  class_weights: -1
+  num_points: -1
+  contrast:
+    num_classes: 4 # bg+fg
+    stage: "Ua"
+    num_layers: 5
+    ftype: "f_out"
+    dist: "l2"
+    pos: "cnt"
+    contrast_func: "softnn"
+    sample: "label"
+    temperature: 2.0
+    weight: 8.0
+
+data:
+  train:
+    img_size: 192
+    type: 'svg'
+    num_classes: 3
+    data_root: 'dataset/us_plans/json'
+    repeat: 1
+    split: "train_cpu"
+    data_norm: "mean"
+    aug:
+      aug_prob: 0.3
+      hflip: True
+      vflip: True
+      color: True
+
+      rotate:
+        enable: False
+        angle: [-180,180]
+      rotate2: False
+
+      scale:
+        enable: False
+        ratio: [0.5,1.5]
+
+      shift:
+        enable: False
+        scale: [-0.5,0.5]
+
+      cutmix:
+        enable: False
+        queueK: 4
+        relative_shift: [-0.5,0.5]
+
+  test:
+    img_size: 192
+    type: 'svg'
+    num_classes: 3
+    data_root: 'dataset/us_plans/json'
+    repeat: 1
+    split: "val_cpu"
+    data_norm: "mean"
+    aug: False
+
+dataloader:
+  train:
+    batch_size: 1
+    num_workers: 2
+  test:
+    batch_size: 1
+    num_workers: 2
+
+optimizer:
+  type: 'AdamW'
+  lr: 0.0002
+  weight_decay: 0.1
+  weight_decay_embed: 0.1
+  decoder_multiplier: 1.0
+  clip_gradients_enabled: True
+  clip_gradients_type: "full_model"
+  clip_gradients_norm_type: 2.0
+  clip_gradients_value: 2.0
+
+scheduler:
+  type: 'cosine'
+  warmup_epochs: 3
+  min_lr: 1e-7
+
+fp16: False
+epochs: 20
+step_epoch: 2
+save_freq: 1
+pretrain: ''   # set to work_dirs/cubicasa/best.pth for the warm start
+work_dir: './work_dirs/us_cpu'
+
+# 8 GPUs x batch 2 = effective batch 16 already; no accumulation needed.
+accumulate_steps: 16
+
+# Rolling checkpoint about every 10 minutes, so a crash costs little.
+save_interval_iters: 200
+
+# Stop once the score stops improving, instead of always running every epoch.
+# metric: miou (moves from epoch 1) or pq (can sit at 0 for a long time on this
+# class balance, which would trigger a false stop). Also selects best.pth.
+early_stop:
+  metric: miou
+  patience: 4
+  min_delta: 0.2

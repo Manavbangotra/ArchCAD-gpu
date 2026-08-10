@@ -1,0 +1,155 @@
+# DPSS on FloorPlanCAD — the paper's own recipe (arXiv:2503.22346, §Implementation).
+#
+# Highest-accuracy configuration. Values taken from the paper rather than from
+# the shipped svg_pointT.yaml, which disagrees with it on three counts:
+#
+#            paper        shipped config
+#   img_size  700x700      980            <- paper is smaller
+#   lr        2e-4         1e-5           <- shipped is 20x lower
+#   epochs    50           100
+#   batch     2 per GPU x 8 GPUs = 16 effective
+#
+# lr 2e-4 pairs with an effective batch of 16, which is exactly what train.py's
+# scaler assumes as its reference, so leave both as-is and it computes 2e-4.
+#
+# Reported target on FloorPlanCAD: PQ 86.2 / SQ 93.0 / RQ 92.6 (without priors),
+# 89.5 / 96.2 / 93.1 with priors. For reference, SymPointV2 reaches 83.2 PQ.
+#
+# Launch on 8 GPUs with tools/train_dist.sh (GPUS=8, --sync_bn).
+# On one 80GB GPU instead: set batch_size 16, accumulate_steps 1 — same
+# effective batch, and BatchNorm sees all 16 samples as it does with sync_bn.
+#
+# CAVEAT — one part of the recipe cannot be reproduced from this release: the
+# paper initialises the point branch from a PointTransformerV2 encoder
+# pretrained on ScanNetV2. This repo ships PointTransformer *v1* blocks
+# (modules/pointtransformer_utils.py) and no such checkpoint, so the point
+# pathway starts from scratch. Expect to land below the published PQ.
+#
+# Differs from svg_pointT.yaml (ArchCAD) in one important way: FloorPlanCAD
+# annotates 35 classes, not 30. The background semantic id follows the class
+# count, so it is 35 here and the contrastive head sees 36 (35 + background).
+model:
+  in_channels: 10
+  semantic_classes: 35
+  #decoder
+  num_decoders: 3
+  dropout: 0.1
+  pre_norm: False
+  num_heads: 8
+  shared_decoder: True
+  dim_feedforward: 512
+  hidden_dim: 256
+  num_queries: 800
+  gauss_scale: 1.0
+  normalize_pos_enc: False
+  #dn
+  scalar: 1
+  dn_mask_noise_scale: 0.0
+  dn_label_noise_ratio: 0.2
+  vision:
+    dim: 64
+    backbone: "hrnet48"
+    yaml: "configs/svg/hrnet48.yaml"
+    pretrained: "svgnet/pretrained/hrnet_ocr_cocostuff_3965_torch04.pth"
+
+matcher:
+  cost_class: 2.
+  cost_mask: 7.
+  cost_dice: 5.
+  num_points: -1
+
+criterion:
+  num_classes: 35
+  eos_coef: 0.05
+  losses:
+    - "labels"
+    - "masks"
+  ignore_label: -1
+  class_weights: -1
+  num_points: -1
+  contrast:
+    num_classes: 36 # bg+fg
+    stage: "Ua"
+    num_layers: 5
+    ftype: "f_out"
+    dist: "l2"
+    pos: "cnt"
+    contrast_func: "softnn"
+    sample: "label"
+    temperature: 2.0
+    weight: 8.0
+
+data:
+  train:
+    img_size: 700
+    type: 'svg'
+    data_root: 'dataset/FloorplanCAD/json'
+    repeat: 1
+    split: "train"
+    data_norm: "mean"
+    aug:
+      aug_prob: 0.3
+      hflip: True
+      vflip: True
+      color: True
+
+      rotate:
+        enable: False
+        angle: [-180,180]
+      rotate2: False
+
+      scale:
+        enable: False
+        ratio: [0.5,1.5]
+
+      shift:
+        enable: False
+        scale: [-0.5,0.5]
+
+      cutmix:
+        enable: False
+        queueK: 4
+        relative_shift: [-0.5,0.5]
+
+  test:
+    img_size: 700
+    type: 'svg'
+    data_root: 'dataset/FloorplanCAD/json'
+    repeat: 1
+    split: "test"
+    data_norm: "mean"
+    aug: False
+
+dataloader:
+  train:
+    batch_size: 2
+    num_workers: 4
+  test:
+    batch_size: 2
+    num_workers: 4
+
+optimizer:
+  type: 'AdamW'
+  lr: 0.0002
+  weight_decay: 0.1
+  weight_decay_embed: 0.1
+  decoder_multiplier: 1.0
+  clip_gradients_enabled: True
+  clip_gradients_type: "full_model"
+  clip_gradients_norm_type: 2.0
+  clip_gradients_value: 2.0
+
+scheduler:
+  type: 'cosine'
+  warmup_epochs: 3
+  min_lr: 1e-7
+
+fp16: False
+epochs: 50
+step_epoch: 2
+save_freq: 1
+pretrain: ''
+work_dir: './work_dirs/fpcad_paper8gpu'
+
+# 8 GPUs x batch 2 = effective batch 16 already; no accumulation needed.
+accumulate_steps: 1

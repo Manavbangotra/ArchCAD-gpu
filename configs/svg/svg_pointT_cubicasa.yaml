@@ -1,0 +1,146 @@
+# Stage 1 pretraining on CubiCasa5K, for door/window spotting.
+#
+# Same 4-class taxonomy as svg_pointT_us.yaml (door/window/wall/background) so
+# the classifier head transfers to stage 2 instead of being discarded.
+#
+# CubiCasa annotations are vector polygons, not just raster masks, so both the
+# point branch and the image branch get pretrained here. Instance ids come free
+# (one per polygon) -- on CAD data they have to be inferred by clustering.
+#
+# Deliberate limitation: these polygons are object *outlines*, with none of the
+# dimension lines, hatching or text a construction sheet carries, and the plans
+# are Finnish residential. Pretraining on this is a cleaner task than the real
+# one; svg_pointT_us.yaml is what adapts the model to US construction documents.
+#
+# LICENCE: CubiCasa5K is CC BY-NC 4.0. Any model trained from this config is
+# research-only and must not ship in a commercial product. Keep its checkpoints
+# under work_dirs/cubicasa/ and separate from stage 2, and keep the
+# no-pretrain ablation so a licence-clean model stays one run away.
+
+model:
+  in_channels: 10
+  semantic_classes: 3
+  #decoder
+  num_decoders: 3
+  dropout: 0.1
+  pre_norm: False
+  num_heads: 8
+  shared_decoder: True
+  dim_feedforward: 512
+  hidden_dim: 256
+  num_queries: 800
+  gauss_scale: 1.0
+  normalize_pos_enc: False
+  #dn
+  scalar: 1
+  dn_mask_noise_scale: 0.0
+  dn_label_noise_ratio: 0.2
+  vision:
+    dim: 64
+    backbone: "hrnet48"
+    yaml: "configs/svg/hrnet48.yaml"
+    pretrained: "svgnet/pretrained/hrnet_ocr_cocostuff_3965_torch04.pth"
+
+matcher:
+  cost_class: 2.
+  cost_mask: 7.
+  cost_dice: 5.
+  num_points: -1
+
+criterion:
+  num_classes: 3
+  eos_coef: 0.05
+  losses:
+    - "labels"
+    - "masks"
+  ignore_label: -1
+  class_weights: -1
+  num_points: -1
+  contrast:
+    num_classes: 4 # bg+fg
+    stage: "Ua"
+    num_layers: 5
+    ftype: "f_out"
+    dist: "l2"
+    pos: "cnt"
+    contrast_func: "softnn"
+    sample: "label"
+    temperature: 2.0
+    weight: 8.0
+
+data:
+  train:
+    img_size: 700
+    type: 'svg'
+    num_classes: 3
+    data_root: 'dataset/cubicasa/json'
+    repeat: 1
+    split: "train"
+    data_norm: "mean"
+    aug:
+      aug_prob: 0.3
+      hflip: True
+      vflip: True
+      color: True
+
+      rotate:
+        enable: False
+        angle: [-180,180]
+      rotate2: False
+
+      scale:
+        enable: False
+        ratio: [0.5,1.5]
+
+      shift:
+        enable: False
+        scale: [-0.5,0.5]
+
+      cutmix:
+        enable: False
+        queueK: 4
+        relative_shift: [-0.5,0.5]
+
+  test:
+    img_size: 700
+    type: 'svg'
+    num_classes: 3
+    data_root: 'dataset/cubicasa/json'
+    repeat: 1
+    split: "test"
+    data_norm: "mean"
+    aug: False
+
+dataloader:
+  train:
+    batch_size: 2
+    num_workers: 4
+  test:
+    batch_size: 2
+    num_workers: 4
+
+optimizer:
+  type: 'AdamW'
+  lr: 0.0002
+  weight_decay: 0.1
+  weight_decay_embed: 0.1
+  decoder_multiplier: 1.0
+  clip_gradients_enabled: True
+  clip_gradients_type: "full_model"
+  clip_gradients_norm_type: 2.0
+  clip_gradients_value: 2.0
+
+scheduler:
+  type: 'cosine'
+  warmup_epochs: 3
+  min_lr: 1e-7
+
+fp16: False
+epochs: 50
+step_epoch: 2
+save_freq: 1
+pretrain: ''   # set to work_dirs/cubicasa/best.pth for the warm start
+work_dir: './work_dirs/cubicasa'
+
+# 8 GPUs x batch 2 = effective batch 16 already; no accumulation needed.
+accumulate_steps: 1

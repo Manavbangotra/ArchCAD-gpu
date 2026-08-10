@@ -1,0 +1,30 @@
+# Dependencies for training on an NVIDIA GPU (e.g. RTX 3060 under WSL2).
+#
+# Install with:
+#   pip install -r requirements-cuda.txt
+#
+# The torch/torchvision lines pull CUDA 12.4 builds via the index URL below.
+# For a different CUDA version, change cu124 to match your driver
+# (see https://pytorch.org/get-started/locally/).
+#
+# Use requirements-cpu.txt instead on a machine with no GPU.
+
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch
+torchvision
+
+munch
+PyYAML
+svgpathtools
+pillow
+numpy
+scipy
+tensorboard
+tensorboardX
+gdown
+
+# Deliberately NOT required:
+#   detectron2 - shimmed by svgnet/util/d2_compat.py
+#   mmcv       - not imported anywhere
+#   pointops   - pure-PyTorch fallback in modules/pointops/functions/pointops.py
