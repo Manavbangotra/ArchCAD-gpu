@@ -140,6 +140,7 @@ data/
 !svgnet/data/
 !svgnet/data/**
 !dataset/*.py
+!dataset/*.sh
 
 # ...but the un-ignore above must not drag compiled bytecode back in.
 svgnet/data/__pycache__/

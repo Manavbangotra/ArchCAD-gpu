@@ -191,16 +191,21 @@ def _atomic_save(obj, path):
     os.replace(tmp, path)
 
 
-def checkpoint_save(epoch, model, optimizer, work_dir, save_freq=16, best=False, rolling=False):
+def checkpoint_save(epoch, model, optimizer, work_dir, save_freq=16, best=False,
+                    rolling=False, best_metric=None):
     if hasattr(model, "module"):
         model = model.module
 
     if best:
-        checkpoint = {"net": weights_to_cpu(model.state_dict()), "epoch": epoch}
+        checkpoint = {"net": weights_to_cpu(model.state_dict()), "epoch": epoch,
+                      "best_metric": best_metric}
         _atomic_save(checkpoint, os.path.join(work_dir, "best.pth"))
         return
 
-    checkpoint = {"net": weights_to_cpu(model.state_dict()), "optimizer": optimizer.state_dict(), "epoch": epoch}
+    # best_metric rides along so that resuming does not restart the comparison
+    # from zero and overwrite best.pth with a worse checkpoint.
+    checkpoint = {"net": weights_to_cpu(model.state_dict()), "optimizer": optimizer.state_dict(),
+                  "epoch": epoch, "best_metric": best_metric}
 
     # `rolling` writes only latest.pth — used for frequent mid-epoch saves so an
     # unexpected shutdown costs minutes instead of a whole epoch.

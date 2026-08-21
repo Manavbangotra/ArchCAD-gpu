@@ -81,11 +81,27 @@ def from_cubicasa(class_attr):
 _US_LAYER_RULES = [
     # Exclude before include: these contain "DOOR"/"WALL" but are annotation,
     # not the object itself, and would otherwise poison the labels.
-    (re.compile(r"(ANNO|DIM|NOTE|TEXT|TAG|SCHED|KEYN|IDEN|PATT|HATCH)", re.I), BACKGROUND),
+    #
+    # KEY/LEGEND/TITLE/MATCHLINE were added when the include patterns below were
+    # loosened -- "WALLKEY" is a legend entry, not a wall, and only the exclusion
+    # keeps it out now that a bare "WALL" matches.
+    (re.compile(r"(ANNO|DIM|NOTE|TEXT|TAG|SCHED|KEYN|IDEN|PATT|HATCH"
+                r"|KEY|LEGEND|TITLE|MATCHLINE|MATCH[\s_-]*LINE)", re.I), BACKGROUND),
 
-    (re.compile(r"\bDOOR\b|A[\s_-]*DOOR|DR[\s_-]*OPNG", re.I), DOOR),
-    (re.compile(r"GLAZ|\bWIND(OW)?\b|A[\s_-]*WIN\b|CURTAIN[\s_-]*WALL|CW[\s_-]*SYS", re.I), WINDOW),
-    (re.compile(r"\bWALL\b|A[\s_-]*WALL|PARTITION|\bPRTN\b", re.I), WALL),
+    # No \b around the keyword. Word boundaries looked tidy but silently dropped
+    # three whole families of real layers, measured across this corpus:
+    #   plurals     A-08-WINDOWS, A-WINDOWS, ARCHICAD DOORS, WALLS
+    #   compounds   A-FIREWALL, A-RTWALL, A-03-CONC-TILTWALL, INTWALL
+    #   underscores LINE_WALL, A-SECTION_WALL, MAIN EXTERIOR WALL_PEN_NO__149
+    # ("_" is a word character, so \bWALL\b never matches "LINE_WALL".)
+    # 72 distinct layer names were being sent to background this way, which is
+    # why some buildings reported zero walls or zero windows.
+    #
+    # Order matters: DOOR before WINDOW so a combined "DOORWIN" layer lands on
+    # door, and WINDOW before WALL so "CURTAIN WALL" stays a window.
+    (re.compile(r"DOORS?|DR[\s_-]*OPNG", re.I), DOOR),
+    (re.compile(r"GLAZ|WINDOWS?|WIN[\s_-]*WELL|CURTAIN[\s_-]*WALL|CW[\s_-]*SYS", re.I), WINDOW),
+    (re.compile(r"WALLS?|PARTITION|PRTN", re.I), WALL),
 ]
 
 

@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -406,10 +407,28 @@ TILE_KEYS = ("lengths", "commands", "widths", "rgb",
              "semanticIds", "instanceIds", "layerIds")
 
 
+def _bbox(args, idxs):
+    """Bounding box of the chosen primitives' control points."""
+    xs = [v for i in idxs for v in args[i][0::2]]
+    ys = [v for i in idxs for v in args[i][1::2]]
+    return (min(xs), min(ys), max(xs), max(ys)) if xs else (0.0, 0.0, 0.0, 0.0)
+
+
 def _emit_tile(data, idxs, ox, oy, tw, th):
-    """Build one tile dict from a subset of a sheet's primitives."""
+    """Build one tile dict from a subset of a sheet's primitives.
+
+    Coordinates come out **y-down**, matching the tile's PNG and the SVG
+    convention the CubiCasa and FloorPlanCAD converters already use.
+
+    PDF space has y growing upwards; a raster has it growing down. Emitting the
+    raw PDF y left the point branch and the image branch vertically mirrored
+    with respect to each other -- the model was being shown a drawing and a set
+    of labels that disagreed about which end was the top. Measured over 10 tiles,
+    labels landed on the drawing's ink 44% of the time under a y-flip against
+    17% as stored, so the flip is not a matter of taste.
+    """
     tile = {k: [data[k][i] for i in idxs] for k in TILE_KEYS}
-    tile["args"] = [[(v - ox) if j % 2 == 0 else (v - oy)
+    tile["args"] = [[(v - ox) if j % 2 == 0 else (th - (v - oy))
                      for j, v in enumerate(data["args"][i])] for i in idxs]
     tile["width"], tile["height"] = tw, th
     tile["n_layers"] = data.get("n_layers", 1)
@@ -478,7 +497,14 @@ def tile_sheet(data, max_prims, min_prims=200, max_depth=8, overlap=0.0):
     """
     n = len(data["args"])
     if n <= max_prims:
-        yield "", data
+        # Route the whole sheet through _emit_tile too, rather than yielding the
+        # raw dict: it is what applies the y-up -> y-down flip, and a sheet small
+        # enough to skip tiling must not end up in a different convention from
+        # every other tile.
+        whole = _emit_tile(data, list(range(n)), 0.0, 0.0, data["width"], data["height"])
+        if data.get("image"):
+            whole["image"] = data["image"]
+        yield "", whole
         return
 
     regions = list(_split_region(data, list(range(n)), 0.0, 0.0,
@@ -507,6 +533,16 @@ def tile_sheet(data, max_prims, min_prims=200, max_depth=8, overlap=0.0):
             x0, y0, tw2, th2 = ox, oy, tw, th
         else:
             tw2, th2 = x1 - x0, y1 - y0
+
+        # Fit the tile to the geometry it actually contains, not to the nominal
+        # window. Primitives are chosen by centroid, so a long wall whose midpoint
+        # falls inside can reach well outside; the image is cropped to the tile
+        # rectangle, so anything beyond it had no pixels underneath and the point
+        # branch and image branch disagreed about the extent of the scene.
+        bx0, by0, bx1, by1 = _bbox(args, idxs)
+        x0, y0 = min(x0, bx0), min(y0, by0)
+        tw2 = max(x1, bx1) - x0
+        th2 = max(y1, by1) - y0
         yield f"_t{k:03d}", _emit_tile(data, idxs, x0, y0, tw2, th2)
 
 
@@ -591,6 +627,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pdf_dir", help="directory of plan-set PDFs")
+    ap.add_argument("--skip_existing", action="store_true",
+                    help="skip a planset whose tiles are already in --output_dir")
     ap.add_argument("--pdf", help="a single PDF instead of --pdf_dir")
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--render", action="store_true", help="rasterise a PNG per sheet")
@@ -600,6 +638,11 @@ def main():
     ap.add_argument("--require_labels", action="store_true",
                     help="skip sheets with no door/window primitives (for training data)")
     ap.add_argument("--max_pages", type=int, default=None)
+    ap.add_argument("--max_page_prims", type=int, default=120000,
+                    help="skip sheets denser than this. Tiling is superlinear in "
+                         "primitive count, and a handful of pathological sheets "
+                         "(one MicroStation set reaches 269k paths on a page) can "
+                         "stall a run for hours while contributing little.")
     ap.add_argument("--overlap", type=float, default=0.0,
                     help="grow each tile by this fraction so neighbours share a "
                          "margin; avoids cutting objects at tile edges")
@@ -625,6 +668,10 @@ def main():
             failed += 1
             continue
 
+        if args.skip_existing and glob.glob(osp.join(args.output_dir, f"{stem}_p*_s2.json")):
+            print(f"[have] {stem}")
+            continue
+
         pages = list(pdf.pages)[:args.max_pages] if args.max_pages else list(pdf.pages)
         for i, page in enumerate(pages, start=1):
             name = f"{stem}_p{i:04d}"
@@ -636,6 +683,12 @@ def main():
                 continue
 
             if len(data["args"]) < args.min_prims:
+                skipped += 1
+                continue
+
+            if args.max_page_prims and len(data["args"]) > args.max_page_prims:
+                print(f"[skip] {name}: {len(data['args'])} primitives "
+                      f"exceeds --max_page_prims {args.max_page_prims}")
                 skipped += 1
                 continue
 

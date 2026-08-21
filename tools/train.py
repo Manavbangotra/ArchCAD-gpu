@@ -59,6 +59,8 @@ def get_args():
 
 
 def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger, writer):
+    global best_metric
+    skipped = {"n": 0}
 
     model.train()
     iter_time = AverageMeter(True)
@@ -87,11 +89,14 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
                 _, loss, log_vars = model(batch)
 
             except Exception as e:
-                print(f"Error in file {batch[-1]}")
-                print(f"Error encountered for batch: {e}")
-                continue # 
-                loss = torch.tensor(0.1, device=batch[0].device)
-                log_vars = {}
+                # Skipping a bad batch is fine; skipping most of them silently is
+                # not. Count them and say so, so a systematic data fault shows up
+                # as a number instead of scrolling past as noise.
+                skipped["n"] += 1
+                if skipped["n"] <= 5 or skipped["n"] % 100 == 0:
+                    logger.warning(f"batch {i} skipped ({type(e).__name__}: {e}) "
+                                   f"file={batch[-1]} -- {skipped['n']} so far this epoch")
+                continue
 
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
@@ -132,7 +137,8 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
         # it replays the current epoch from its start, but keeps the weights and
         # optimizer state — far cheaper than losing the epoch entirely.
         if save_interval_iters and is_multiple(i, save_interval_iters) and is_main_process():
-            checkpoint_save(epoch, model, optimizer, cfg.work_dir, cfg.save_freq, rolling=True)
+            checkpoint_save(epoch, model, optimizer, cfg.work_dir, cfg.save_freq, rolling=True,
+                            best_metric=best_metric)
             logger.info(f"Rolling checkpoint saved at epoch {epoch} iter {i}")
 
 
@@ -162,12 +168,16 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
     writer.add_scalar("train/learning_rate", lr, epoch)
     for k, v in meter_dict.items():
         writer.add_scalar(f"train/{k}", v.avg, epoch)
-    checkpoint_save(epoch, model, optimizer, cfg.work_dir, cfg.save_freq)
+    if skipped["n"]:
+        logger.warning(f"epoch {epoch}: {skipped['n']} of {len(train_loader)} batches skipped")
+    checkpoint_save(epoch, model, optimizer, cfg.work_dir, cfg.save_freq,
+                    best_metric=best_metric)
 
 
 # train 改完不要忘记val
 
 def validate(epoch, model, optimizer, val_loader, cfg, logger, writer):
+    val_skipped = {"n": 0}
     logger.info("Validation")
     # dist.get_world_size() raises when training on a single GPU without
     # torchrun; get_dist_info() reports world_size 1 in that case.
@@ -203,11 +213,16 @@ def validate(epoch, model, optimizer, val_loader, cfg, logger, writer):
                     if k not in meter_dict.keys() and k != "placeholder":
                         meter_dict[k] = AverageMeter()
                     meter_dict[k].update(v)
-            except:
-                print(f"Error in file {batch[-1]}")
+            except Exception as e:
+                val_skipped["n"] += 1
+                if val_skipped["n"] <= 5:
+                    logger.warning(f"validation batch skipped ({type(e).__name__}: {e}) "
+                                   f"file={batch[-1]}")
 
     global best_metric
 
+    if val_skipped["n"]:
+        logger.warning(f"validation: {val_skipped['n']} of {len(val_loader)} batches skipped")
     logger.info("Evaluate semantic segmentation")
     miou,acc = sem_point_eval.get_eval(logger)
     logger.info("Evaluate panoptic segmentation")
@@ -231,7 +246,8 @@ def validate(epoch, model, optimizer, val_loader, cfg, logger, writer):
 
     if score > best_metric:
         best_metric = score
-        checkpoint_save(epoch, model, optimizer, cfg.work_dir, cfg.save_freq, best=True)
+        checkpoint_save(epoch, model, optimizer, cfg.work_dir, cfg.save_freq, best=True,
+                        best_metric=best_metric)
         logger.info(f"New best {which} {best_metric:.3f} at epoch {epoch}")
 
     return score
@@ -346,6 +362,15 @@ def main():
 
     global best_metric
     best_metric = 0
+    if args.resume:
+        # Without this, a resumed run compares against 0 and the first validated
+        # epoch overwrites best.pth even when it is worse than what came before.
+        try:
+            _ck = torch.load(args.resume, map_location="cpu", weights_only=False)
+            best_metric = float(_ck.get("best_metric") or 0)
+            logger.info(f"Restored best_metric {best_metric:.3f} from {args.resume}")
+        except Exception as exc:
+            logger.warning(f"Could not read best_metric from {args.resume}: {exc}")
 
     # if is_main_process():
     #     validate(0, model, optimizer, val_loader, cfg, logger, writer)

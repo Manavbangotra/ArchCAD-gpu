@@ -37,10 +37,12 @@ import sys
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, osp.dirname(osp.abspath(__file__)))
+from svg_geom import (IDENTITY, apply, mat_mul, parse_transform,  # noqa: E402
+                      path_segments, rejoin, segments_to_runs)
 from taxonomy import BACKGROUND, from_cubicasa  # noqa: E402
 
 SVG_NS = "{http://www.w3.org/2000/svg}"
-CMD_LINE = 0
+CMD_LINE, CMD_ARC = 0, 1
 
 
 def _strip_ns(tag):
@@ -63,18 +65,6 @@ def _svg_size(root):
     return _float(root.get("width"), 1.0), _float(root.get("height"), 1.0)
 
 
-def _polygon_points(g):
-    """Points of the first <polygon> child, as [(x, y), ...]."""
-    for child in g:
-        if _strip_ns(child.tag) == "polygon":
-            raw = child.get("points", "")
-            pts = []
-            for token in raw.replace(",", " ").split():
-                pts.append(float(token))
-            return list(zip(pts[0::2], pts[1::2]))
-    return []
-
-
 def _line_points(p0, p1):
     (x1, y1), (x2, y2) = p0, p1
     return [x1, y1,
@@ -83,57 +73,143 @@ def _line_points(p0, p1):
             x2, y2]
 
 
+def _pairs(raw):
+    v = [float(t) for t in (raw or "").replace(",", " ").split()]
+    return list(zip(v[0::2], v[1::2]))
+
+
+# Classes that carry no geometry of their own worth keeping: the CubiCasa web
+# editor writes its handles into the same SVG.
+_EDITOR = re.compile(r"(SelectionControls|Control$|Control\b|Resize[NSEW]{1,2}Control)")
+
+# Only these tokens change the label. Everything else -- Panel, Glass,
+# Threshold, PanelArea, Frame, Indicator, InnerPolygon -- is a *part of* the
+# object above it and inherits that object's class. This is the fix that lets a
+# door's swing arc (a <path> two groups deep under Panel) be labelled DOOR
+# instead of background, and window mullions (<line> under Panel) be WINDOW.
+_ROOT_TOKENS = {"Door", "Window", "Wall"}
+
+
+def _element_runs(el, ctm):
+    """Geometry of one element as [(points, closed), ...] in root coordinates."""
+    tag = _strip_ns(el.tag)
+    if tag == "polygon":
+        pts = _pairs(el.get("points"))
+        return [([apply(ctm, x, y) for x, y in pts], True)] if len(pts) >= 2 else []
+    if tag == "polyline":
+        pts = _pairs(el.get("points"))
+        return [([apply(ctm, x, y) for x, y in pts], False)] if len(pts) >= 2 else []
+    if tag == "line":
+        p0 = apply(ctm, _float(el.get("x1")), _float(el.get("y1")))
+        p1 = apply(ctm, _float(el.get("x2")), _float(el.get("y2")))
+        return [([p0, p1], False)] if p0 != p1 else []
+    if tag == "rect":
+        x, y = _float(el.get("x")), _float(el.get("y"))
+        w, h = _float(el.get("width")), _float(el.get("height"))
+        if w <= 0 or h <= 0:
+            return []
+        corners = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+        return [([apply(ctm, px, py) for px, py in corners], True)]
+    if tag in ("circle", "ellipse"):
+        cx, cy = _float(el.get("cx")), _float(el.get("cy"))
+        if tag == "circle":
+            rx = ry = _float(el.get("r"))
+        else:
+            rx, ry = _float(el.get("rx")), _float(el.get("ry"))
+        if rx <= 0 or ry <= 0:
+            return []
+        pts = [apply(ctm, cx + rx*math.cos(t*math.pi/8), cy + ry*math.sin(t*math.pi/8))
+               for t in range(16)]
+        return [(pts, True)]
+    if tag == "path":
+        segs = path_segments(el.get("d"))
+        return [([apply(ctm, x, y) for x, y in pts], closed)
+                for pts, closed in segments_to_runs(segs)]
+    return []
+
+
 def parse_svg(svg_path, with_text=False):
-    """One CubiCasa model.svg -> the loader's dict schema."""
+    """One CubiCasa model.svg -> the loader's dict schema.
+
+    Walks the tree rather than iterating <g> flatly, so that transforms compose
+    and sub-parts inherit their parent object's class.
+    """
     root = ET.parse(svg_path).getroot()
     width, height = _svg_size(root)
 
     args, lengths, commands, widths, rgbs = [], [], [], [], []
     sem_ids, ins_ids, layer_ids = [], [], []
-    instance = 0
     xs, ys = [], []
+    seen = set()            # rounded edge keys, to drop coincident duplicates
+    counters = {"instance": 0, "group": 0}
 
-    for g in root.iter(SVG_NS + "g"):
-        cls_attr = g.get("class")
-        if not cls_attr:
-            continue
-        cls = from_cubicasa(cls_attr)
-        if cls == BACKGROUND:
-            # Rooms and furniture become background under this taxonomy; keeping
-            # their outlines gives the model realistic non-target geometry to
-            # reject rather than an unnaturally empty scene.
-            pass
+    def emit(prim, cls, instance, group):
+        if prim[0] == "arc":
+            (a, b, radius) = prim[1], prim[2], prim[3]
+            cmd = CMD_ARC
+        else:
+            a, b = prim[1], prim[2]
+            cmd = CMD_LINE
+        if math.dist(a, b) < 1e-9:
+            return False
+        # Threshold/PanelArea repeat their parent Door's rectangle verbatim and
+        # would otherwise arrive labelled background, i.e. identical geometry
+        # with contradictory supervision. First writer wins, and document order
+        # puts the meaningful parent first.
+        key = (round(a[0], 2), round(a[1], 2), round(b[0], 2), round(b[1], 2), cmd)
+        rkey = (key[2], key[3], key[0], key[1], cmd)
+        if key in seen or rkey in seen:
+            return False
+        seen.add(key)
 
-        pts = _polygon_points(g)
-        if len(pts) < 2:
-            continue
+        args.append(_line_points(a, b))
+        lengths.append(math.dist(a, b))
+        commands.append(cmd)
+        widths.append(1.0)
+        rgbs.append([0, 0, 0])
+        sem_ids.append(cls)
+        ins_ids.append(instance if cls != BACKGROUND else -1)
+        # NOT the class. CubiCasa has no CAD layers, and setting layerId to the
+        # class hands the answer straight to the model as an input. A per-group
+        # counter is structural information a real drawing could also provide.
+        layer_ids.append(group)
+        xs.extend((a[0], b[0])); ys.extend((a[1], b[1]))
+        return True
 
-        # Close the polygon: an outline is a loop.
-        ring = pts + [pts[0]] if pts[0] != pts[-1] else pts
-        emitted = False
-        for a, b in zip(ring, ring[1:]):
-            if a == b:
-                continue
-            args.append(_line_points(a, b))
-            lengths.append(math.dist(a, b))
-            commands.append(CMD_LINE)
-            widths.append(1.0)
-            rgbs.append([0, 0, 0])
-            sem_ids.append(cls)
-            # Instance per polygon; background stays -1 ("stuff").
-            ins_ids.append(instance if cls != BACKGROUND else -1)
-            # NOT the class. CubiCasa has no CAD layers, and setting layerId to
-            # the class hands the answer straight to the model as an input --
-            # layerId == semanticId on every sample. Group by polygon instead,
-            # which is structural information a real drawing could also provide.
-            layer_ids.append(instance)
-            xs.extend((a[0], b[0])); ys.extend((a[1], b[1]))
-            emitted = True
-        if emitted and cls != BACKGROUND:
-            instance += 1
+    def walk(el, ctm, cls, instance, group):
+        tag = _strip_ns(el.tag)
+        if tag in ("defs", "desc", "text", "marker", "symbol", "use"):
+            return
+        cls_attr = el.get("class") or ""
+        if _EDITOR.search(cls_attr):
+            return
+        if "display: none" in (el.get("style") or "").replace(" ", " "):
+            return                       # hidden Dimension / TextLabel subtrees
+
+        ctm = mat_mul(ctm, parse_transform(el.get("transform")))
+
+        head = cls_attr.split()[0].strip() if cls_attr else ""
+        if head in _ROOT_TOKENS:
+            cls = from_cubicasa(cls_attr)
+            counters["instance"] += 1
+            instance = counters["instance"]
+        if cls_attr:
+            counters["group"] += 1
+            group = counters["group"]
+
+        for pts, closed in _element_runs(el, ctm):
+            for prim in rejoin(pts, closed):
+                emit(prim, cls, instance, group)
+
+        # Descend regardless of tag: geometry hangs off <svg> and <g> alike, and
+        # a <g class="Door"> holds its swing arc several levels down.
+        for child in el:
+            walk(child, ctm, cls, instance, group)
+
+    walk(root, IDENTITY, BACKGROUND, -1, 0)
 
     if not args:
-        raise ValueError(f"no polygons found in {svg_path}")
+        raise ValueError(f"no geometry found in {svg_path}")
 
     # Some CubiCasa SVGs lack a usable viewBox; fall back to the drawn extent.
     if width <= 1 or height <= 1:
@@ -220,7 +296,7 @@ def main():
                          "the model; see extract_texts)")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--require_labels", action="store_true",
-                    help="skip plans with no door or window polygons")
+                    help="skip plans with no door or window geometry")
     args = ap.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)

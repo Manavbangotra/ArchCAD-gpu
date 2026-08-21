@@ -24,6 +24,11 @@ tensorboard
 tensorboardX
 gdown
 
+# Reads the PDF content stream and its optional-content groups, which is where
+# dataset/parse_pdf_plans.py gets its per-primitive labels. MPL-2.0, chosen over
+# PyMuPDF so nothing downstream inherits AGPL.
+pikepdf
+
 # Deliberately NOT required:
 #   detectron2 - shimmed by svgnet/util/d2_compat.py
 #   mmcv       - not imported anywhere

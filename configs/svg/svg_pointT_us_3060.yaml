@@ -1,28 +1,23 @@
-# Doors, windows and walls on CubiCasa5K — single RTX 3060 (12GB).
+# Door / window / wall on US construction documents, one RTX 3060 (12GB).
 #
-# 3 classes + background: 0 door, 1 window, 2 wall, 3 background.
+# Stage 2 of two. Stage 1 (svg_pointT_cc_3060.yaml) pretrains on CubiCasa5K;
+# this adapts that model to real construction sheets, which carry the dimension
+# lines, hatching, schedules and title blocks CubiCasa has none of.
 #
-# Sizing (measured on this codebase, fp32, batch 1):
-#     700px / 800 queries   6.0 GB      512px / 400 queries   3.8 GB
-#     980px / 800 queries   7.8 GB      batch 2 @ 980px      ~14 GB (does not fit)
-# fp16 roughly halves the activation share, so 700px at batch 2 sits
-# comfortably inside 12GB.
+# Labels come free from the AIA CAD layer names preserved in the PDF's optional
+# content groups (dataset/parse_pdf_plans.py -> dataset/taxonomy.py). No manual
+# annotation. Two consequences to keep in mind:
+#   * The labels are a heuristic, so the metrics measure agreement with that
+#     heuristic and not with ground truth. The split is by *project*, so no
+#     building appears in both train and test, but a systematic layer-naming
+#     mistake would not show up in any number here.
+#   * model.use_layer_fusion stays False. With labels derived from layers,
+#     predicting each layer group's majority class already scores 100%, so
+#     feeding layer identity in would hand over the answer.
 #
-# batch_size 2 x accumulate_steps 8 = effective batch 16, which is what the
-# learning rate below assumes and what the DPSS paper used (2 per GPU x 8 GPUs).
-# train.py scales lr from the effective batch, so leave both alone.
-#
-# class_weights is the change that matters most here. On CPU the model drifted
-# toward walls -- door IoU fell 37.5 -> 25.5 across one epoch while wall rose
-# 60.2 -> 68.0 -- because walls are 58.6% of labelled primitives against 22.0%
-# door and 19.4% window, so ignoring doors was simply cheaper. These are
-# sqrt-inverse-frequency weights computed from the training split: gentle enough
-# to avoid destabilising the loss, firm enough that dropping doors costs.
-#
-# use_layer_fusion stays off. The layer input must never be able to substitute
-# for the answer; see the note in dataset/taxonomy.py.
-#
-# LICENCE: CubiCasa5K is CC BY-NC 4.0 — research only, not for shipping.
+# LICENCE: if the stage-1 checkpoint is used as `pretrain`, this model inherits
+# CubiCasa5K's CC BY-NC 4.0 and is research-only. Train from scratch (pretrain:
+# '') for anything that has to ship.
 
 model:
   in_channels: 10
@@ -60,8 +55,13 @@ criterion:
     - "labels"
     - "masks"
   ignore_label: -1
-  # door, window, wall — sqrt-inverse frequency, normalised to mean 1
-  class_weights: [1.121, 1.192, 0.687]
+  # door, window, wall — sqrt-inverse frequency, normalised to mean 1.
+  # Measured on the actual train split (800 of 2,254 tiles): door 4.78%,
+  # window 3.36%, wall 6.05%, background 85.81%. Wall and window roughly
+  # doubled once the layer regex stopped dropping WALLS/LINE_WALL/A-FIREWALL.
+  # Without weighting the cheapest move is to call everything background,
+  # which is how the earlier CubiCasa run collapsed.
+  class_weights: [0.974, 1.161, 0.865]
   num_points: -1
   contrast:
     num_classes: 4
@@ -80,9 +80,7 @@ data:
     img_size: 700
     type: 'svg'
     num_classes: 3
-    # json4, not json3: json3 dropped every door swing arc and emitted the same
-    # edges with contradictory labels. See dataset/parse_cubicasa.py.
-    data_root: 'dataset/cubicasa/json4'
+    data_root: 'dataset/us_plans/json4'
     repeat: 1
     split: "train"
     data_norm: "mean"
@@ -110,7 +108,7 @@ data:
     img_size: 700
     type: 'svg'
     num_classes: 3
-    data_root: 'dataset/cubicasa/json4'
+    data_root: 'dataset/us_plans/json4'
     repeat: 1
     split: "test"
     data_norm: "mean"
@@ -145,8 +143,10 @@ epochs: 60
 step_epoch: 2
 save_freq: 10
 save_interval_iters: 500
-pretrain: ''
-work_dir: './work_dirs/cc_3060'
+# Stage-1 CubiCasa checkpoint. tools/train.py loads it non-strict and skips
+# size-mismatched tensors, so the backbone transfers even if the head differs.
+pretrain: './work_dirs/cc_3060/best.pth'
+work_dir: './work_dirs/us_3060'
 
 # batch 2 x 8 = effective 16, matching the learning rate above.
 accumulate_steps: 8

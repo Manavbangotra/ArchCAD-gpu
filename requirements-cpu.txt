@@ -5,6 +5,7 @@ pillow==12.2.0
 PyYAML==6.0.3
 scipy==1.18.0
 svgpathtools==1.7.2
+pikepdf            # PDF content-stream + OCG layer reading (parse_pdf_plans.py)
 tensorboard==2.21.0
 tensorboard-data-server==0.7.2
 tensorboardX==2.6.5

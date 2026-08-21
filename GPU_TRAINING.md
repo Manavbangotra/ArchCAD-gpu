@@ -27,7 +27,7 @@ python dataset/parse_cubicasa.py \
     --split_file dataset/cubicasa/cubicasa5k/train.txt \
     --output_dir dataset/cubicasa/json3/train --require_labels
 # ...and again with val.txt -> json3/test
-```
+```V
 
 4,199 train + 400 test convert cleanly.
 
