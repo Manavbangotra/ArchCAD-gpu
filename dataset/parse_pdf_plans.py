@@ -24,6 +24,7 @@ import argparse
 import glob
 import json
 import math
+import random
 import os
 import os.path as osp
 import re
@@ -439,6 +440,111 @@ def _emit_tile(data, idxs, ox, oy, tw, th):
     return tile
 
 
+def _page_scale(data, min_objects=4):
+    """This sheet's drawing scale, read off the objects on it.
+
+    A door is a real thing of near-constant size, so how large it is drawn says
+    what scale the sheet is at: about 15 units where a plan is at 1/8"=1', about
+    60 where an enlarged plan or detail is. Measured across one plan set the
+    per-page median moved 4.1x, which is why a window of constant *drawing
+    units* still shows the model wildly different apparent door sizes -- fixing
+    tile size alone changed the spread 4.8x -> 4.9x, i.e. not at all.
+
+    Sizing the window as a multiple of this instead makes one window cover the
+    same real-world area on every sheet. Returns None when the sheet carries too
+    few labelled objects to judge, and the caller falls back to halving.
+    """
+    args = data["args"]
+    sem, inst = data["semanticIds"], data["instanceIds"]
+    for cls in (0, 1):                      # doors read scale best, then windows
+        groups = {}
+        for i, (sc, iid) in enumerate(zip(sem, inst)):
+            if sc == cls and iid >= 0:
+                groups.setdefault(iid, []).append(i)
+        vals = []
+        for idxs in groups.values():
+            if len(idxs) < 2:
+                continue
+            xs = [v for i in idxs for v in args[i][0::2]]
+            ys = [v for i in idxs for v in args[i][1::2]]
+            vals.append(max(max(xs) - min(xs), max(ys) - min(ys)))
+        if len(vals) >= min_objects:
+            return float(np.median(vals))
+    return None
+
+
+def _thin_background(data, idxs, cap, rng):
+    """Drop background primitives until a window fits the budget.
+
+    A fixed window cannot adapt its size to density, so a dense one has to be
+    thinned instead. Everything labelled door, window or wall is kept -- those
+    are what the model is being asked to find; only the unlabelled clutter
+    (dimension strings, hatching, notes) is sampled down.
+    """
+    sem = data["semanticIds"]
+    keep = [i for i in idxs if sem[i] != 3]
+    bg = [i for i in idxs if sem[i] == 3]
+    room = cap - len(keep)
+    if room <= 0:
+        return sorted(keep)          # already over budget on labelled work alone
+    if len(bg) > room:
+        bg = list(bg)
+        rng.shuffle(bg)
+        bg = bg[:room]
+    return sorted(keep + bg)
+
+
+def _fixed_windows(data, tile_units, min_prims, max_prims, overlap, seed=0):
+    """Cut the sheet into windows of one constant size.
+
+    `_split_region` sizes tiles by primitive count, so a dense plan area ends up
+    in a small tile and a sparse one in a large tile -- measured at 5.5x across
+    the corpus. The loader then divides each tile by its own width and height,
+    which turns that into a 10.3x spread in how big a door looks to the model.
+    A constant window removes the tiling half of that: every tile is scaled by
+    the same factor, so a door keeps the same relative size.
+
+    What it does not remove is drawing scale -- a detail at 1"=1' draws a door
+    7x larger than a floor plan at 1/8"=1', and both appear on one sheet.
+    """
+    args = data["args"]
+    n = len(args)
+    rng = random.Random(seed)
+    cx = [sum(a[0::2]) / 4.0 for a in args]
+    cy = [sum(a[1::2]) / 4.0 for a in args]
+
+    nx = max(1, int(math.ceil(data["width"] / tile_units)))
+    ny = max(1, int(math.ceil(data["height"] / tile_units)))
+    cells = {}
+    for i in range(n):
+        gx = min(nx - 1, int(cx[i] / tile_units))
+        gy = min(ny - 1, int(cy[i] / tile_units))
+        cells.setdefault((gx, gy), []).append(i)
+
+    m = tile_units * overlap if overlap > 0 else 0.0
+    k = 0
+    for (gx, gy) in sorted(cells):
+        ox, oy = gx * tile_units, gy * tile_units
+        x0, y0 = ox - m, oy - m
+        tw = th = tile_units + 2 * m
+        if m:
+            x1, y1 = x0 + tw, y0 + th
+            idxs = [i for i in range(n) if x0 <= cx[i] < x1 and y0 <= cy[i] < y1]
+        else:
+            idxs = cells[(gx, gy)]
+        if len(idxs) < min_prims:
+            continue
+        if max_prims and len(idxs) > max_prims:
+            idxs = _thin_background(data, idxs, max_prims, rng)
+        # Deliberately NOT grown to the geometry bbox the way the adaptive path
+        # does: that fit is what makes tiles different sizes, which is the whole
+        # thing being removed here. A primitive whose centroid sits inside but
+        # whose far end reaches past the edge normalises outside [0,1] and
+        # samples the image border, which is the accepted cost.
+        yield f"_w{k:03d}", _emit_tile(data, idxs, x0, y0, tw, th)
+        k += 1
+
+
 def _split_region(data, idxs, ox, oy, w, h, max_prims, min_prims, depth, max_depth):
     """Recursively halve a region until every part is under the cap.
 
@@ -477,7 +583,8 @@ def _split_region(data, idxs, ox, oy, w, h, max_prims, min_prims, depth, max_dep
                                  max_prims, min_prims, depth + 1, max_depth)
 
 
-def tile_sheet(data, max_prims, min_prims=200, max_depth=8, overlap=0.0):
+def tile_sheet(data, max_prims, min_prims=200, max_depth=8, overlap=0.0,
+               emit_page_max=0, tile_units=0.0, tile_doors=0.0):
     """Split a sheet into tiles, each small enough to train on.
 
     `overlap` (0-0.5) grows every tile outward by that fraction of its size, so
@@ -496,6 +603,21 @@ def tile_sheet(data, max_prims, min_prims=200, max_depth=8, overlap=0.0):
     consistent across tile boundaries. Yields (suffix, tile_dict).
     """
     n = len(data["args"])
+    if tile_doors:
+        est = _page_scale(data)
+        # No labelled objects means no scale reading; halving is the fallback,
+        # and such a sheet has nothing to learn from anyway.
+        tile_units = tile_doors * est if est else 0.0
+    if tile_units:
+        yield from _fixed_windows(data, tile_units, min_prims, max_prims, overlap)
+        if emit_page_max and n <= emit_page_max:
+            whole = _emit_tile(data, list(range(n)), 0.0, 0.0,
+                               data["width"], data["height"])
+            if data.get("image"):
+                whole["image"] = data["image"]
+            yield "_full", whole
+        return
+
     if n <= max_prims:
         # Route the whole sheet through _emit_tile too, rather than yielding the
         # raw dict: it is what applies the y-up -> y-down flip, and a sheet small
@@ -545,6 +667,16 @@ def tile_sheet(data, max_prims, min_prims=200, max_depth=8, overlap=0.0):
         th2 = max(y1, by1) - y0
         yield f"_t{k:03d}", _emit_tile(data, idxs, x0, y0, tw2, th2)
 
+    # The tiles carry the detail; the sheet carries the context that tells a
+    # plan from an elevation. Emitting both lets the model see each scale. Only
+    # up to a budget: the point branch is quadratic, so an unbounded sheet is
+    # what tiling exists to avoid in the first place.
+    if emit_page_max and n <= emit_page_max:
+        whole = _emit_tile(data, list(range(n)), 0.0, 0.0, data["width"], data["height"])
+        if data.get("image"):
+            whole["image"] = data["image"]
+        yield "_full", whole
+
 
 def crop_tile_image(page_png, tile, out_png, size=980):
     """Cut this tile's area out of the rendered page.
@@ -590,12 +722,21 @@ def crop_tile_image(page_png, tile, out_png, size=980):
     xs = [c[0] for c in corners]
     ys = [c[1] for c in corners]
 
-    box = (max(0, int(min(xs))), max(0, int(min(ys))),
-           min(img.width, int(max(xs))), min(img.height, int(max(ys))))
-    if box[2] - box[0] < 8 or box[3] - box[1] < 8:
+    bx0, by0 = int(round(min(xs))), int(round(min(ys)))
+    bx1, by1 = int(round(max(xs))), int(round(max(ys)))
+    if bx1 - bx0 < 8 or by1 - by0 < 8:
         return None
 
-    patch = img.crop(box)
+    # Take the exact tile rectangle even where it runs off the rendered page,
+    # padding the outside with white. Clamping to the image instead shrank the
+    # crop while the primitives still spanned the whole tile, so resizing to a
+    # square left the two a few percent apart -- worst at sheet edges, which is
+    # why most interior tiles looked fine and edge tiles did not.
+    patch = Image.new("RGB", (bx1 - bx0, by1 - by0), (255, 255, 255))
+    ix0, iy0 = max(bx0, 0), max(by0, 0)
+    ix1, iy1 = min(bx1, img.width), min(by1, img.height)
+    if ix1 > ix0 and iy1 > iy0:
+        patch.paste(img.crop((ix0, iy0, ix1, iy1)), (ix0 - bx0, iy0 - by0))
     # The render is the page turned clockwise by /Rotate; turn the patch back
     # the other way so it lines up with the primitive coordinates.
     if rot:
@@ -646,6 +787,16 @@ def main():
     ap.add_argument("--overlap", type=float, default=0.0,
                     help="grow each tile by this fraction so neighbours share a "
                          "margin; avoids cutting objects at tile edges")
+    ap.add_argument("--tile_doors", type=float, default=0.0,
+                    help="cut fixed windows this many door-widths across, sized "
+                         "per page from its own drawing scale (0 = off). "
+                         "Overrides --tile_units on sheets it can measure.")
+    ap.add_argument("--tile_units", type=float, default=0.0,
+                    help="cut fixed windows this many drawing units across, "
+                         "instead of halving by primitive count (0 = adaptive)")
+    ap.add_argument("--emit_page_max", type=int, default=0,
+                    help="also write each page whole, when it has at most this "
+                         "many primitives (0 disables)")
     ap.add_argument("--max_prims", type=int, default=6000,
                     help="tile sheets above this many primitives (FloorPlanCAD "
                          "drawings are 2k-7k; the point branch scales quadratically)")
@@ -697,7 +848,11 @@ def main():
                 tmp_png = osp.join(args.output_dir, f".{name}_page.png")
                 page_png = render_page(path, i, tmp_png, args.img_size * 3)
 
-            for suffix, tile in tile_sheet(data, args.max_prims, overlap=args.overlap):
+            for suffix, tile in tile_sheet(data, args.max_prims,
+                                           overlap=args.overlap,
+                                           emit_page_max=args.emit_page_max,
+                                           tile_units=args.tile_units,
+                                           tile_doors=args.tile_doors):
                 if len(tile["args"]) < args.min_prims:
                     skipped += 1
                     continue

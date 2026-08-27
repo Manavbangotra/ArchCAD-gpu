@@ -131,7 +131,7 @@ dmypy.json
 # Dataset files (重要！)
 # Note: `dataset/*` rather than `dataset/`, because git will not descend into
 # an excluded directory, and so cannot re-include the scripts below it.
-dataset/*
+# dataset/*
 data/
 
 # ...these are source code, not data. The bare `data/` rule also matches
