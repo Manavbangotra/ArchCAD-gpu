@@ -218,3 +218,6 @@ dataset/FloorplanCAD/json/
 # .override.json next to it are human work and ARE tracked.
 *.autoalign.json
 dataset/us_plans/*/.editor_index.json
+
+# FloorPlanCAD download archives and extraction
+dataset/FloorplanCAD/
