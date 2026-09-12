@@ -18,11 +18,14 @@ Then open http://localhost:8900/
 """
 
 import argparse
+import gzip
+import hashlib
 import json
 import os
 import os.path as osp
 import re
 import struct
+import sys
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
@@ -176,6 +179,81 @@ def _read_side(tile_path, kind, default=None):
         return default
 
 
+def _project_layermap_path(tile_path=None):
+    """Where project-wide layer rules live: beside the canonical tiles.
+
+    Under all/ rather than the corpus root so svgnet/data/svg.py finds it by the
+    same rule it uses for every other sidecar, and so a re-split cannot delete
+    it.
+    """
+    alld = osp.join(ROOT, "all")
+    return osp.join(alld if osp.isdir(alld) else ROOT, "_project_layermap.json")
+
+
+def _read_project_layermap():
+    try:
+        with open(_project_layermap_path()) as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _invalidate_index():
+    """Drop the cached per-tile summaries and the file behind them."""
+    global INDEX
+    INDEX = None
+    if INDEX_PATH and osp.exists(INDEX_PATH):
+        try:
+            os.remove(INDEX_PATH)
+        except OSError:
+            pass
+
+
+def _merged_layermap(tile_path):
+    """Layer rules in effect for a tile: project-wide first, then the tile's own.
+
+    Project scope is the point of the format. A primitive index names a different
+    thing on every tile, but "A-FLOR-PFIX" names the same thing on all 166 sheets
+    of a plan set, so one decision can cover the set -- and it survives a
+    re-parse, which renumbers primitives.
+    """
+    rules = {}
+    try:
+        with open(_project_layermap_path(tile_path)) as fh:
+            rules.update(json.load(fh).get("rules", {}))
+    except Exception:
+        pass
+    rules.update((_read_side(tile_path, "layermap") or {}).get("rules", {}))
+    return rules
+
+
+def _corrected(tile_path, data):
+    """semanticIds with the layer rules and the brush applied.
+
+    Same precedence as svgnet/data/svg.py: parser < project layermap < tile
+    layermap < per-primitive override. The two implementations have to agree or
+    the tile list, the canvas and the training run disagree about the same tile.
+    """
+    sem = list(data["semanticIds"])
+    names = data.get("layerNames") or []
+    rules = _merged_layermap(tile_path) if names else {}
+    if rules:
+        lids = data.get("layerIds") or []
+        lut = {i: rules[n] for i, n in enumerate(names) if n in rules}
+        if lut:
+            for i, li in enumerate(lids):
+                if i < len(sem) and li in lut:
+                    sem[i] = lut[li]
+    for k, v in (_read_side(tile_path, "override") or {}).items():
+        try:
+            i = int(k)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= i < len(sem):
+            sem[i] = int(v)
+    return sem
+
+
 def _png_size(path):
     """Pixel size straight from the PNG header, so the editor stays stdlib-only."""
     try:
@@ -201,14 +279,67 @@ def _norm_align(a):
             "sx": float(a.get("sx", k) or k), "sy": float(a.get("sy", k) or k)}
 
 
-CLASSES = [("door", "#E11D48"), ("window", "#2563EB"),
-           ("wall", "#C2761E"), ("background", "#B9C0C8")]
+sys.path.insert(0, osp.join(osp.dirname(osp.dirname(osp.abspath(__file__))), "dataset"))
+import taxonomy as TX  # noqa: E402
+
+# The class list is taken from dataset/taxonomy.py rather than written out here.
+# It used to be hardcoded in two places -- a dead Python constant and the JS
+# string -- which is exactly how a click labelled "background" ends up writing
+# id 3, which under Arch-43 is "folding door".
+US4_PALETTE = ["#E11D48", "#2563EB", "#C2761E", "#B9C0C8"]
+
+TAXONOMY = "us4"
+CLASSES = []            # [(name, "#RRGGBB"), ...] indexed by class id
+FAMILIES = []           # [(family name, [ids]), ...]
+BG = TX.BACKGROUND
+COARSE = {}             # coarse id -> (name, [member ids])
+
+
+def set_taxonomy(name):
+    """Switch the editor's vocabulary. Called once, before the page is served."""
+    global TAXONOMY, CLASSES, FAMILIES, BG, COARSE
+    TAXONOMY = name
+    if name == "arch":
+        CLASSES = [(c["name"], TX.ARCH_HEX[i])
+                   for i, c in enumerate(TX.ARCH_CATEGORIES)]
+        FAMILIES = [(fam, list(ids)) for fam, ids in TX.FAMILIES]
+        BG = TX.ARCH_BG
+        COARSE = {cid: (TX.COARSE_NAMES[cid], list(members))
+                  for cid, members in TX.COARSE_GROUPS.items()}
+    else:
+        CLASSES = [(TX.CLASS_NAMES[i], US4_PALETTE[i]) for i in range(4)]
+        FAMILIES = [("classes", [0, 1, 2]), ("background", [3])]
+        BG = TX.BACKGROUND
+        COARSE = {}
+
+
+def detect_taxonomy(root):
+    """Read the marker dataset/parse_pdf_plans.py leaves beside a corpus.
+
+    Guessing from the id range is not safe: json4's ids are 0-3, which are legal
+    in both spaces but mean door/window/wall in one and single/double/sliding
+    door in the other. Opening the old corpus with the new palette produces a
+    convincing and entirely wrong picture, so an explicit marker it is. Corpora
+    written before the marker existed are us4 by construction.
+    """
+    for cand in (osp.join(root, ".taxonomy"), osp.join(root, "all", ".taxonomy")):
+        try:
+            with open(cand) as fh:
+                v = fh.read().strip()
+            if v:
+                return v
+        except OSError:
+            pass
+    return "us4"
+
+
 PROJ = re.compile(r"^(project_\d+)_")
 ROOT = None
 AUTOALIGN = True
 KEEP_ROOT = None
 DROP_ROOT = None
 VIEW = ""
+VIEWPORTS = {}
 
 
 def tiles():
@@ -230,21 +361,35 @@ def tiles():
 
 INDEX = None
 INDEX_PATH = None
+INDEX_VERSION = 2
+
+
+def _index_key():
+    """Cache key covering the schema version and the class vocabulary."""
+    blob = json.dumps([INDEX_VERSION, TAXONOMY, [c[0] for c in CLASSES]])
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
 def build_index(force=False):
     """Summarise every tile once and cache it to disk.
 
     Counting classes means parsing each tile, and a tile can be megabytes, so
-    doing it per request made the list take minutes. Cache is keyed on the tile
-    count, so adding tiles rebuilds it.
+    doing it per request made the list take minutes.
+
+    The cache key is the tile count AND a hash of the class names. Keying on
+    the count alone meant a taxonomy change silently reused rows describing the
+    old vocabulary -- the row said "door" while the tile now said "single door".
+    Renaming, adding or reordering a class invalidates; changing only a colour
+    does not, which is right.
     """
     global INDEX
     names = tiles()
+    key = _index_key()
     if not force and INDEX_PATH and osp.exists(INDEX_PATH):
         try:
             cached = json.load(open(INDEX_PATH))
-            if cached.get("key_len") == len(names):
+            if (cached.get("key_len") == len(names)
+                    and cached.get("taxonomy_key") == key):
                 INDEX = cached["rows"]
                 return INDEX
         except Exception:
@@ -259,7 +404,8 @@ def build_index(force=False):
     INDEX = rows
     if INDEX_PATH:
         try:
-            json.dump({"key_len": len(names), "rows": rows}, open(INDEX_PATH, "w"))
+            json.dump({"key_len": len(names), "taxonomy_key": _index_key(),
+                       "rows": rows}, open(INDEX_PATH, "w"))
         except Exception:
             pass
     return INDEX
@@ -271,13 +417,36 @@ def summary(split, name):
         d = json.load(open(p))
     except Exception:
         return None
-    c = Counter(d["semanticIds"])
+    sem = _corrected(p, d)
+    c = Counter(sem)
     ov = _side(p, "override")
+    lm = _side(p, "layermap")
+    # Only the classes actually present, biggest first and background dropped.
+    # A fixed door/window/wall triple cannot describe 43 classes, and a dense
+    # 44-bin histogram on every row would triple the size of the index for no
+    # benefit -- most tiles touch fewer than eight classes.
+    top = [[k, v] for k, v in c.most_common() if k != BG][:4]
     return {"split": split, "name": name,
             "project": (PROJ.match(name).group(1) if PROJ.match(name) else "?"),
             "n": len(d["semanticIds"]),
-            "door": c.get(0, 0), "window": c.get(1, 0), "wall": c.get(2, 0),
-            "edited": osp.exists(ov)}
+            "top": top,
+            "edited": osp.exists(ov) or osp.exists(lm),
+            "kind": (VIEWPORTS.get(name) or {}).get("kind", "")}
+
+
+def render_page():
+    """The page with the class vocabulary substituted in.
+
+    Plain token replacement rather than % or .format: the page is dense with
+    literal braces in CSS and JS template strings, and both of those would eat
+    them. Re-rendered per request, which is free next to the no-store header
+    already set and means an edit shows up on reload.
+    """
+    coarse = {str(cid): [name, members] for cid, (name, members) in COARSE.items()}
+    return (PAGE.replace("__CLASSES__", json.dumps(CLASSES))
+                .replace("__FAMILIES__", json.dumps(FAMILIES))
+                .replace("__COARSE__", json.dumps(coarse))
+                .replace("__BG__", str(BG)))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -289,11 +458,22 @@ class Handler(BaseHTTPRequestHandler):
             body = json.dumps(body).encode()
         elif isinstance(body, str):
             body = body.encode()
+        enc = None
+        # Compress anything substantial. The tile list is the big one -- at 27k
+        # tiles it is megabytes of highly repetitive JSON, and on this machine
+        # the TLS-inspecting antivirus resets a localhost response somewhere
+        # above ~100 KB, which surfaces as a bare ConnectionResetError with the
+        # request looking like it simply hung. gzip takes it back under.
+        if len(body) > 8192 and "gzip" in self.headers.get("Accept-Encoding", ""):
+            body = gzip.compress(body, 6)
+            enc = "gzip"
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         # The page is generated from this file; a cached copy silently keeps
         # running yesterday's JS, which looks exactly like "the fix didn't work".
         self.send_header("Cache-Control", "no-store, must-revalidate")
+        if enc:
+            self.send_header("Content-Encoding", enc)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -303,7 +483,7 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
 
         if u.path == "/":
-            return self._send(200, PAGE, "text/html; charset=utf-8")
+            return self._send(200, render_page(), "text/html; charset=utf-8")
 
         if u.path == "/api/tiles":
             rows = INDEX if INDEX is not None else build_index()
@@ -314,13 +494,24 @@ class Handler(BaseHTTPRequestHandler):
             proj = q.get("project", [None])[0]
             if proj:
                 rows = [r for r in rows if r["project"] == proj]
+            kind = q.get("kind", [None])[0]
+            if kind:
+                # Read from VIEWPORTS at request time, not from the index: the
+                # index is cache-keyed, so a re-run of classify_viewports.py
+                # would never show up in it.
+                rows = [r for r in rows
+                        if ((VIEWPORTS.get(r["name"]) or {}).get("kind")
+                            or "unlabelled") == kind]
             # Read verdicts at request time rather than caching them into the
             # index: the index is keyed on tile count, so a verdict changed
             # after it was built would never show up.
             out = []
             for r in rows:
                 v = _read_side(osp.join(ROOT, r["split"], r["name"]), "verdict")
-                out.append(dict(r, verdict=(v or {}).get("verdict", "")))
+                vp = VIEWPORTS.get(r["name"]) or {}
+                out.append(dict(r, verdict=(v or {}).get("verdict", ""),
+                                kind=vp.get("kind", "unlabelled"),
+                                title=vp.get("title", "")[:60]))
             return self._send(200, {"tiles": out, "view": VIEW,
                                     "projects": sorted({r["project"] for r in rows})})
 
@@ -358,6 +549,9 @@ class Handler(BaseHTTPRequestHandler):
                 "args": d["args"], "semanticIds": d["semanticIds"],
                 "commands": d.get("commands", []),
                 "layerIds": d.get("layerIds", []),
+                "layerNames": d.get("layerNames", []),
+                "layermap": _merged_layermap(p),
+                "projectLayermap": (_read_project_layermap() or {}).get("rules", {}),
                 "image": f"/img?split={split}&name={name}",
                 "overrides": over,
                 "verdict": (_read_side(p, "verdict") or {}).get("verdict", ""),
@@ -462,6 +656,50 @@ class Handler(BaseHTTPRequestHandler):
                         break
             return self._send(200, {"saved": len(over), "path": ovp})
 
+        if u.path == "/api/layermap":
+            # Assign a class to every primitive drawn on one CAD layer. The unit
+            # of work that makes a 43-class corpus tractable: brushing ~27k
+            # tiles one segment at a time is not a workflow, and "everything on
+            # A-FLOR-PFIX is a toilet" is one decision a reviewer can check and
+            # revert in one line.
+            layer = payload.get("layer")
+            if not layer or not isinstance(layer, str):
+                return self._send(400, {"error": "layer required"})
+            cls = payload.get("cls")
+            cls = None if cls is None else int(cls)
+            scope = payload.get("scope", "tile")
+
+            if scope == "project":
+                path = _project_layermap_path(None)
+                doc = _read_project_layermap() or {"version": 1, "rules": {}}
+            else:
+                p = osp.join(ROOT, payload["split"], payload["name"])
+                path = _side(p, "layermap")
+                doc = _read_side(p, "layermap") or {"version": 1, "rules": {}}
+
+            rules = doc.setdefault("rules", {})
+            if cls is None:
+                rules.pop(layer, None)
+            else:
+                rules[layer] = cls
+            if rules:
+                os.makedirs(osp.dirname(path), exist_ok=True)
+                json.dump(doc, open(path, "w"), indent=1)
+            elif osp.exists(path):
+                os.remove(path)         # cleared every rule -> drop the file
+
+            # A project rule changes what every tile shows, so the cached
+            # per-tile summaries are stale. Cheaper to drop the cache than to
+            # re-read thousands of tiles inline.
+            if scope == "project":
+                _invalidate_index()
+            elif INDEX is not None:
+                for r in INDEX:
+                    if r["split"] == payload.get("split") and r["name"] == payload.get("name"):
+                        r["edited"] = True
+                        break
+            return self._send(200, {"scope": scope, "rules": rules, "path": path})
+
         return self._send(404, {"error": "not found"})
 
 
@@ -474,7 +712,22 @@ PAGE = r"""<!doctype html><meta charset=utf-8>
 body{margin:0;height:100vh;display:grid;grid-template-columns:290px 1fr 210px;
      background:var(--bg);color:var(--ink);font:14px/1.5 "Ubuntu Sans",system-ui,sans-serif}
 aside{background:var(--panel);border-right:1px solid var(--rule);overflow-y:auto}
-aside.r{border-right:none;border-left:1px solid var(--rule);padding:14px}
+aside.r{border-right:none;border-left:1px solid var(--rule);padding:14px;overflow-y:auto}
+#clsq{width:100%;margin-bottom:8px;padding:5px 7px;border:1px solid var(--rule);
+      border-radius:5px;background:var(--bg);color:var(--ink);font:inherit;font-size:12px}
+#palette details{margin-bottom:4px}
+#palette summary{cursor:pointer;font:600 10px/1.8 ui-monospace,monospace;
+      letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+#recent{margin-bottom:8px}
+.lay{display:flex;align-items:center;gap:5px;padding:2px 4px;border-radius:4px;
+     cursor:pointer;font-size:11px;line-height:1.6}
+.lay:hover{background:var(--bg)}
+.lay.iso{outline:1px solid var(--accent)}
+.lay .ln{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lay .lc{opacity:.5;font-variant-numeric:tabular-nums}
+.lay .lr{font-size:10px;white-space:nowrap}
+.lay .lx{margin-left:3px;opacity:.6;color:var(--ink)}
+.lay .eye{opacity:.6}
 h2{font:600 11px/1 ui-monospace,monospace;letter-spacing:.12em;text-transform:uppercase;
    color:var(--muted);margin:16px 12px 8px}
 select,button{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--rule);
@@ -549,8 +802,20 @@ main{position:relative;overflow:hidden;background:var(--bg)}
 
 <aside class=r>
   <h2 style="margin:0 0 8px">Paint as</h2>
+  <input id=clsq placeholder="filter &mdash; door, toil, rail" autocomplete=off>
+  <div id=recent></div>
   <div id=palette></div>
   <div class=stat id=counts></div>
+  <h2 style="margin:16px 0 8px">Layers</h2>
+  <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+    click a layer to give every primitive on it the paint class.<br>
+    &#9678; isolate &middot; &times; clear the rule
+  </div>
+  <div id=lscope style="display:flex;gap:6px;margin-bottom:6px">
+    <button data-s="tile" class=on aria-pressed=true style="flex:1">this tile</button>
+    <button data-s="project" style="flex:1">whole project</button>
+  </div>
+  <div id=layers></div>
   <h2 style="margin:16px 0 8px">Regions</h2>
   <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
     box part of a sheet when the tile is partly plan and partly not.<br>
@@ -608,8 +873,12 @@ main{position:relative;overflow:hidden;background:var(--bg)}
 </aside>
 
 <script>
-const CLASSES=[["door","#E11D48"],["window","#2563EB"],["wall","#C2761E"],["background","#B9C0C8"]];
+const CLASSES=__CLASSES__, FAMILIES=__FAMILIES__, BG=__BG__, COARSE=__COARSE__;
 let TILES=[], cur=null, data=null, over={}, undo=[], paint=0, showbg=true;
+let layermap={}, projmap={}, layerScope="tile", onlyLayer=null, hoverLayer=null;
+let RECENT=[];
+try{ RECENT=(JSON.parse(localStorage.getItem("archcad.recent")||"[]")||[])
+        .filter(k=>k>=0&&k<CLASSES.length); }catch(e){}
 let al={dx:0,dy:0,sx:1,sy:1};
 let base={sx:1,sy:1}, auto=false;
 let verdict='', regions=[], rpaint='keep', drawing=null, selReg=-1;
@@ -620,7 +889,15 @@ const $=id=>document.getElementById(id);
 const svg=$("svg"), sheet=$("sheet"), stage=$("stage");
 
 function toast(m){const t=$("toast");t.textContent=m;t.classList.add("on");setTimeout(()=>t.classList.remove("on"),1400);}
-function cls(i){return (i in over)?over[i]:data.semanticIds[i];}
+function layerOf(i){const n=data.layerNames||[];return n[data.layerIds[i]];}
+// Same precedence as the server and the training loader: the layer rule is
+// the base, the brush is its exception handler.
+function cls(i){
+  if(i in over) return over[i];
+  const ln=layerOf(i);
+  if(ln!==undefined && ln in layermap) return layermap[ln];
+  return data.semanticIds[i];
+}
 
 async function loadList(project){
   const r=await fetch("/api/tiles"+(project?`?project=${project}`:""));
@@ -640,6 +917,9 @@ async function open_(i){
   document.querySelectorAll(".row").forEach((r,j)=>r.setAttribute("aria-selected",j===i));
   const r=await fetch(`/api/tile?split=${t.split}&name=${encodeURIComponent(t.name)}`);
   data=await r.json(); over=Object.fromEntries(Object.entries(data.overrides||{}).map(([k,v])=>[+k,+v]));
+  layermap=Object.assign({}, data.layermap||{});
+  projmap=Object.assign({}, data.projectLayermap||{});
+  onlyLayer=null;
   al=Object.assign({dx:0,dy:0,sx:1,sy:1}, data.align||{});
   base=Object.assign({sx:1,sy:1}, data.base||{}); auto=!!data.auto; showAlign();
   verdict=data.verdict||''; regions=(data.regions||[]).slice(); showVerdict();
@@ -655,21 +935,28 @@ function draw(){
   const f=document.createDocumentFragment();
   data.args.forEach((a,i)=>{
     const c=cls(i);
-    if(c===3 && !showbg) return;
+    if(c===BG && !showbg) return;
+    if(onlyLayer!==null && data.layerIds[i]!==onlyLayer) return;
     const l=document.createElementNS("http://www.w3.org/2000/svg","line");
     l.setAttribute("x1",a[0]);l.setAttribute("y1",a[1]);
     l.setAttribute("x2",a[6]);l.setAttribute("y2",a[7]);
-    l.setAttribute("stroke",CLASSES[c][1]);
+    l.setAttribute("stroke",(CLASSES[c]||CLASSES[BG])[1]);
     l.dataset.i=i; if(i in over) l.classList.add("sel");
     f.appendChild(l);
   });
   svg.replaceChildren(f); counts();
 }
 function counts(){
-  const c=[0,0,0,0]; data.args.forEach((_,i)=>c[cls(i)]++);
-  $("counts").innerHTML=CLASSES.map((x,k)=>
-    `<div><span style="color:${x[1]}">&#9632;</span> ${x[0]} ${c[k]}</div>`).join("")
-    +`<div style="margin-top:6px;color:var(--muted)">${Object.keys(over).length} corrected</div>`;
+  const c=new Array(CLASSES.length).fill(0);
+  data.args.forEach((_,i)=>{const k=cls(i); if(k<c.length) c[k]++;});
+  const rows=c.map((n,k)=>[k,n]).filter(([k,n])=>n>0&&k!==BG)
+               .sort((a,b)=>b[1]-a[1]);
+  $("counts").innerHTML=rows.map(([k,n])=>
+      `<div><span style="color:${CLASSES[k][1]}">&#9632;</span> ${CLASSES[k][0]} ${n}</div>`).join("")
+    +`<div style="color:var(--muted)"><span>&#9632;</span> background ${c[BG]||0}</div>`
+    +`<div style="margin-top:6px;color:var(--muted)">${Object.keys(over).length} corrected`
+    +`${Object.keys(layermap).length?" &middot; "+Object.keys(layermap).length+" layer rules":""}</div>`;
+  drawLayers();
 }
 
 function apply(){
@@ -906,11 +1193,94 @@ function hit(e){
   counts();
 }
 
-$("palette").innerHTML=CLASSES.map((c,k)=>
-  `<button class=cls data-k=${k} aria-pressed=${k===0}><i style="background:${c[1]}"></i>${c[0]} <span style="float:right;opacity:.5">${k+1}</span></button>`).join("");
-$("palette").onclick=e=>{const b=e.target.closest(".cls"); if(!b)return;
-  paint=+b.dataset.k;
-  document.querySelectorAll(".cls").forEach(x=>x.setAttribute("aria-pressed",x===b));};
+function clsButton(k){
+  const c=CLASSES[k], n=RECENT.indexOf(k);
+  return `<button class=cls data-k=${k} aria-pressed=${k===paint}><i style="background:${c[1]}"></i>${c[0]}`+
+         (n>=0&&n<9?` <span style="float:right;opacity:.5">${n+1}</span>`:"")+`</button>`;
+}
+// Families collapse the list: 44 flat buttons is not a palette, it is a wall.
+// The family holding the current paint class starts open.
+function drawPalette(){
+  const q=($("clsq").value||"").trim().toLowerCase();
+  const hit=k=>!q||CLASSES[k][0].toLowerCase().includes(q);
+  $("recent").innerHTML=RECENT.length
+    ? `<div style="font-size:10px;color:var(--muted);margin:0 0 4px">recent &mdash; keys 1-9</div>`+
+      RECENT.slice(0,9).map(clsButton).join("")
+    : "";
+  $("palette").innerHTML=FAMILIES.map(([fam,ids])=>{
+    const shown=ids.filter(hit);
+    if(!shown.length) return "";
+    const open=q||ids.includes(paint);
+    return `<details ${open?"open":""}><summary>${fam} <span style="opacity:.5">${shown.length}</span></summary>`+
+           shown.map(clsButton).join("")+`</details>`;
+  }).join("");
+}
+function pick(k){
+  paint=k;
+  RECENT=[k].concat(RECENT.filter(x=>x!==k)).slice(0,9);
+  try{ localStorage.setItem("archcad.recent",JSON.stringify(RECENT)); }catch(e){}
+  drawPalette();
+}
+document.addEventListener("click",e=>{const b=e.target.closest(".cls"); if(b) pick(+b.dataset.k);});
+$("clsq").oninput=drawPalette;
+$("clsq").onkeydown=e=>{
+  if(e.key==="Enter"){
+    const q=$("clsq").value.trim().toLowerCase();
+    const m=CLASSES.map((c,k)=>k).filter(k=>CLASSES[k][0].toLowerCase().includes(q));
+    if(m.length===1){ pick(m[0]); $("clsq").value=""; drawPalette(); }
+  }
+  if(e.key==="Escape"){ $("clsq").value=""; drawPalette(); $("clsq").blur(); }
+};
+
+// ---- layers -----------------------------------------------------------------
+// The unit of work for a 43-class corpus. One click says "everything drawn on
+// A-FLOR-PFIX is a toilet" and covers the layer across the tile, or across every
+// sheet of the plan set.
+function drawLayers(){
+  const names=data.layerNames||[];
+  if(!names.length){
+    $("layers").innerHTML=`<div style="font-size:11px;color:var(--muted)">`+
+      `this corpus has no layer names &mdash; re-parse to enable bulk relabel</div>`;
+    return;
+  }
+  const n=new Array(names.length).fill(0);
+  data.layerIds.forEach(li=>{ if(li<n.length) n[li]++; });
+  const rows=n.map((cnt,li)=>[li,cnt]).filter(([,c])=>c>0).sort((a,b)=>b[1]-a[1]);
+  $("layers").innerHTML=rows.map(([li,cnt])=>{
+    const nm=names[li], ruled=nm in layermap, k=ruled?layermap[nm]:null;
+    return `<div class="lay${onlyLayer===li?" iso":""}" data-li=${li} title="${nm}">`+
+      `<span class=eye data-li=${li}>${onlyLayer===li?"&#9673;":"&#9678;"}</span>`+
+      `<span class=ln>${nm}</span><span class=lc>${cnt}</span>`+
+      (ruled?`<span class=lr style="color:${CLASSES[k][1]}">&#9632; ${CLASSES[k][0]}`+
+             `<span class=lx data-li=${li}>&times;</span></span>`:"")+`</div>`;
+  }).join("");
+}
+async function setLayer(li,cls){
+  const nm=(data.layerNames||[])[li]; if(nm===undefined) return;
+  const prev=(nm in layermap)?layermap[nm]:undefined;
+  undo.push({kind:"layer",name:nm,prev:prev});
+  if(cls===null) delete layermap[nm]; else layermap[nm]=cls;
+  const body={layer:nm,cls:cls,scope:layerScope,split:cur.split,name:cur.name};
+  const r=await fetch("/api/layermap",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const j=await r.json();
+  draw();
+  toast(cls===null?`${nm} rule cleared`
+                  :`${nm} \u2192 ${CLASSES[cls][0]} (${layerScope==="project"?"whole project":"this tile"})`);
+}
+$("layers").onclick=e=>{
+  const x=e.target.closest(".lx");
+  if(x){ setLayer(+x.dataset.li,null); return; }
+  const eye=e.target.closest(".eye");
+  if(eye){ const li=+eye.dataset.li; onlyLayer=(onlyLayer===li?null:li); draw(); return; }
+  const row=e.target.closest(".lay");
+  if(row) setLayer(+row.dataset.li,paint);
+};
+$("lscope").onclick=e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  layerScope=b.dataset.s;
+  document.querySelectorAll("#lscope button").forEach(x=>x.setAttribute("aria-pressed",x===b));
+};
 
 function setMode(m){
   mode=m;
@@ -934,7 +1304,16 @@ async function save(){
 $("save").onclick=save;
 
 addEventListener("keydown",e=>{
-  if(e.key>="1"&&e.key<="4"){document.querySelector(`.cls[data-k="${+e.key-1}"]`).click();}
+  // Without this, typing "door" into the class filter fires d=drop and r=region.
+  if(e.target.tagName==="INPUT"||e.target.tagName==="TEXTAREA"){
+    if(e.key==="Escape") e.target.blur();
+    return;
+  }
+  if(e.key==="/"){e.preventDefault(); $("clsq").focus(); return;}
+  // Digits select from the recently-used list, not from all 44 classes: a
+  // session works in two or three families, so recent IS the working set.
+  if(e.key>="1"&&e.key<="9"){const k=RECENT[+e.key-1]; if(k!==undefined) pick(k);}
+  if(e.key==="0") pick(BG);
   if(e.key==="p"||e.key==="P") setMode("paint");
   if(e.key==="h"||e.key==="H") setMode("pan");
   if(e.key==="a"||e.key==="A") setMode("align");
@@ -946,6 +1325,11 @@ addEventListener("keydown",e=>{
   if(e.ctrlKey&&e.key==="s"){e.preventDefault();save();}
   if(e.ctrlKey&&e.key==="z"){e.preventDefault();
     const u=undo.pop(); if(!u)return;
+    if(u.kind==="layer"){
+      const li=(data.layerNames||[]).indexOf(u.name);
+      if(li>=0) setLayer(li,u.prev===undefined?null:u.prev);
+      return;
+    }
     if(u.prev===undefined) delete over[u.i]; else over[u.i]=u.prev;
     draw();}
 });
@@ -981,7 +1365,7 @@ def _warm_all():
 
 
 def main():
-    global ROOT, INDEX_PATH, AUTOALIGN, KEEP_ROOT, DROP_ROOT, VIEW
+    global ROOT, INDEX_PATH, AUTOALIGN, KEEP_ROOT, DROP_ROOT, VIEW, VIEWPORTS
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", required=True, help="corpus dir containing train/ test/ or all/")
@@ -996,12 +1380,48 @@ def main():
     ap.add_argument("--drop_root", help="tree to link a tile into when dropped")
     ap.add_argument("--warm", action="store_true",
                     help="precompute every tile's fit up front instead of on open")
+    ap.add_argument("--taxonomy", choices=("us4", "arch", "auto"), default="auto",
+                    help="label space; auto reads the .taxonomy marker the "
+                         "parser writes beside the corpus")
     a = ap.parse_args()
     ROOT = osp.abspath(a.root)
     KEEP_ROOT = osp.abspath(a.keep_root) if a.keep_root else None
     DROP_ROOT = osp.abspath(a.drop_root) if a.drop_root else None
     VIEW = a.view
     INDEX_PATH = osp.join(ROOT, ".editor_index.json")
+
+    tax = detect_taxonomy(ROOT) if a.taxonomy == "auto" else a.taxonomy
+    set_taxonomy(tax)
+    print(f"taxonomy: {tax} ({len(CLASSES)} classes incl. background)")
+
+    # Drawing titles from dataset/classify_viewports.py, if it has been run.
+    # Shown as a badge and a filter rather than acted on: its "plan" bucket is
+    # the residual one (anything its DROP regex did not recognise), so it is a
+    # prompt for a human, not a verdict.
+    for cand in (osp.join(ROOT, "viewport_labels.json"),
+                 osp.join(ROOT, "all", "viewport_labels.json")):
+        try:
+            with open(cand) as fh:
+                VIEWPORTS = json.load(fh)
+            print(f"viewport labels: {len(VIEWPORTS)} tiles")
+            break
+        except Exception:
+            pass
+
+    if KEEP_ROOT or DROP_ROOT:
+        # os.symlink needs Developer Mode or an elevated shell on Windows, and
+        # _relink has no fallback -- the first tile would 500 the whole
+        # migrate request. Find out now, not twenty verdicts in.
+        probe = osp.join(ROOT, ".symlink_probe")
+        try:
+            os.symlink(__file__, probe)
+            os.remove(probe)
+        except OSError as exc:
+            ap.error(f"--keep_root/--drop_root need symlinks, which this "
+                     f"account cannot create ({exc.__class__.__name__}). Enable "
+                     f"Developer Mode, run elevated, or drop those flags and "
+                     f"use the keep/drop verdicts instead.")
+
     print(f"indexing {len(tiles())} tiles from {ROOT} ...", flush=True)
     build_index(force=a.reindex)
     AUTOALIGN = not a.no_autoalign
