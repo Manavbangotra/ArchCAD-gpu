@@ -24,7 +24,13 @@ class PointWiseEval(object):
         
     def update(self, pred_sem, gt_sem):
         
-        pos_inds = gt_sem != self.ignore_label
+        # Every id at or above the class count is out of scope, not just the
+        # ignore label itself. With `!=`, a coarse band-C id (door-any = 51)
+        # survived this filter and then landed at flat index
+        # (num_classes+1)*pred + 51, which is still inside the flattened
+        # confusion matrix -- so it silently corrupted another cell's count
+        # instead of raising.
+        pos_inds = gt_sem < self._num_classes
         pred = pred_sem[pos_inds]
         gt = gt_sem[pos_inds]
 
@@ -101,13 +107,14 @@ class InstanceEval(object):
         tgt_labels = target["labels"].cpu().numpy().tolist()
         tgt_masks = target["masks"].transpose(0,1).cpu().numpy()
         for tgt_label, tgt_mask in zip(tgt_labels, tgt_masks):
-            if tgt_label==self.ignore_label: continue
+            # >=, so coarse ids above bg do not index past tp_classes.
+            if tgt_label>=self.ignore_label: continue
 
             flag = False
             for instance in instances:
                 src_label = instance["labels"]
                 src_score = instance["scores"]
-                if src_label==self.ignore_label: continue
+                if src_label>=self.ignore_label: continue
                 if src_score< self.min_obj_score: continue
                 src_mask = instance["masks"]
                 

@@ -63,7 +63,13 @@ class SVGNet(nn.Module):
         svg_len = semantic_ids.shape[0]
 
         for (sem_id,ins_id) in keys:
-            if sem_id==bg_sem and ins_id== -1: continue #
+            # >= rather than ==: the coarse band-C ids (door-any, furniture-any,
+            # ...) sit above bg_sem, and the classifier head has no column for
+            # them. Letting one through builds a target whose label indexes past
+            # the head, which is a device-side assert in the matcher, not a
+            # recoverable error. Coarse ids carrying a real instance are handled
+            # by the marginal-loss path; here they are simply not targets.
+            if sem_id>=bg_sem and ins_id== -1: continue #
 
 
             tensor_mask = torch.zeros(svg_len)
