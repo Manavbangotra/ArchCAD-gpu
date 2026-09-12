@@ -17,6 +17,21 @@ import os.path as osp
 import tarfile
 import zipfile
 
+# Machines running TLS-inspecting antivirus (Avast, Kaspersky, corporate
+# middleboxes) present a locally-signed certificate. That root is trusted by the
+# OS but is not in certifi's bundle, which is what requests -- and therefore
+# gdown -- validates against, so every download dies with
+# CERTIFICATE_VERIFY_FAILED. truststore validates against the OS store instead,
+# which trusts the interceptor for the same reason the browser does. This is a
+# real verification path, not a bypass; without truststore installed nothing
+# changes.
+try:
+    import truststore
+
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 # File ids published on the FloorPlanCAD project page.
 DRIVE_FILES = {
     "train_1": "1HcyKt6qWeXog-tRfvEjdO3O3TN91PXGL",

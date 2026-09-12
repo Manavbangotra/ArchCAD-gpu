@@ -34,8 +34,17 @@ import sys
 import numpy as np
 
 sys.path.insert(0, osp.dirname(osp.abspath(__file__)))
-from taxonomy import (BACKGROUND, CATEGORIES, CLASS_NAMES,  # noqa: E402
-                      NUM_CLASSES, from_us_layer)
+from taxonomy import (ARCH_BG, BACKGROUND, CATEGORIES,  # noqa: E402
+                      CLASS_NAMES, NUM_CLASSES, from_arch_layer, from_us_layer)
+
+# Label spaces this parser can emit. "us4" is the original 4-class door/window/
+# wall space; "arch" is the 43-class one that also carries furniture, fixtures,
+# stairs, structure and MEP. Selected with --taxonomy; the default stays us4 so
+# an existing command line reproduces its existing corpus byte for byte.
+TAXONOMIES = {
+    "us4": (from_us_layer, BACKGROUND, (0,), (1,)),
+    "arch": (from_arch_layer, ARCH_BG, (0, 1, 2, 3, 4, 5, 51), (6, 7, 8, 9)),
+}
 
 # Command-type one-hot slots, matching dataset/parse_FpCAD_svg.py.
 CMD_LINE, CMD_ARC = 0, 1
@@ -271,7 +280,7 @@ class PlanExtractor:
 # --------------------------------------------------------------------------- #
 # instances
 # --------------------------------------------------------------------------- #
-def cluster_instances(prims, sem, tol):
+def cluster_instances(prims, sem, tol, bg_id=BACKGROUND):
     """Group same-class primitives into instances by endpoint proximity.
 
     Layers say "these are doors"; they do not say which segments form *one* door.
@@ -300,7 +309,7 @@ def cluster_instances(prims, sem, tol):
     # Bucket endpoints by class so only same-class primitives can merge.
     buckets = {}
     for i, p in enumerate(prims):
-        if sem[i] == BACKGROUND:
+        if sem[i] >= bg_id:          # background, and any coarse band-C id
             continue
         for (x, y) in ((p["pts"][0], p["pts"][1]), (p["pts"][6], p["pts"][7])):
             key = (sem[i], int(x // tol), int(y // tol))
@@ -319,7 +328,7 @@ def cluster_instances(prims, sem, tol):
 
     remap, nxt = {}, 0
     for i in range(n):
-        if sem[i] == BACKGROUND:
+        if sem[i] >= bg_id:          # background, and any coarse band-C id
             continue
         r = find(i)
         if r not in remap:
@@ -332,7 +341,8 @@ def cluster_instances(prims, sem, tol):
 # --------------------------------------------------------------------------- #
 # page -> json
 # --------------------------------------------------------------------------- #
-def parse_page(pdf, page, page_index, render_png=None, cluster_tol_frac=0.004):
+def parse_page(pdf, page, page_index, render_png=None, cluster_tol_frac=0.004,
+               taxonomy="us4"):
     ex = PlanExtractor(pdf)
     try:
         res = page.Resources
@@ -350,9 +360,10 @@ def parse_page(pdf, page, page_index, render_png=None, cluster_tol_frac=0.004):
     width = max(maxx - minx, 1e-6)
     height = max(maxy - miny, 1e-6)
 
-    sem = np.array([from_us_layer(p["layer"]) for p in prims], dtype=np.int64)
+    mapper, bg_id, _, _ = TAXONOMIES[taxonomy]
+    sem = np.array([mapper(p["layer"]) for p in prims], dtype=np.int64)
     tol = cluster_tol_frac * max(width, height)
-    inst = cluster_instances(prims, sem, tol)
+    inst = cluster_instances(prims, sem, tol, bg_id=bg_id)
 
     # Layer id per distinct layer name — the model takes this as a separate input.
     layer_ids, seen = [], {}
@@ -398,6 +409,12 @@ def parse_page(pdf, page, page_index, render_png=None, cluster_tol_frac=0.004):
         "instanceIds": inst.tolist(),
         "layerIds": layer_ids,
         "n_layers": len(seen),
+        # The names behind those ids. Discarding them was what made it
+        # impossible to see *why* a primitive got its label, or to relabel a
+        # whole layer at once -- the editor could only paint one segment at a
+        # time. Indexed by layerId, so the sheet's whole list rides on every
+        # tile of that sheet and the ids stay comparable across them.
+        "layerNames": [nm for nm, _ in sorted(seen.items(), key=lambda kv: kv[1])],
     }
     if render_png:
         data["image"] = osp.basename(render_png)
@@ -433,6 +450,9 @@ def _emit_tile(data, idxs, ox, oy, tw, th):
                      for j, v in enumerate(data["args"][i])] for i in idxs]
     tile["width"], tile["height"] = tw, th
     tile["n_layers"] = data.get("n_layers", 1)
+    # Per-sheet, not per-primitive, so deliberately not in TILE_KEYS -- that
+    # comprehension slices by primitive index and would truncate it.
+    tile["layerNames"] = data.get("layerNames", [])
     # Where this tile sits on the page, so its image can be cropped to match.
     tile["origin"] = [data["origin"][0] + ox, data["origin"][1] + oy]
     tile["page_box"] = data["page_box"]
@@ -440,7 +460,7 @@ def _emit_tile(data, idxs, ox, oy, tw, th):
     return tile
 
 
-def _page_scale(data, min_objects=4):
+def _page_scale(data, min_objects=4, taxonomy="us4"):
     """This sheet's drawing scale, read off the objects on it.
 
     A door is a real thing of near-constant size, so how large it is drawn says
@@ -456,10 +476,11 @@ def _page_scale(data, min_objects=4):
     """
     args = data["args"]
     sem, inst = data["semanticIds"], data["instanceIds"]
-    for cls in (0, 1):                      # doors read scale best, then windows
+    door_ids, win_ids = TAXONOMIES[taxonomy][2], TAXONOMIES[taxonomy][3]
+    for group in (door_ids, win_ids):       # doors read scale best, then windows
         groups = {}
         for i, (sc, iid) in enumerate(zip(sem, inst)):
-            if sc == cls and iid >= 0:
+            if sc in group and iid >= 0:
                 groups.setdefault(iid, []).append(i)
         vals = []
         for idxs in groups.values():
@@ -473,7 +494,7 @@ def _page_scale(data, min_objects=4):
     return None
 
 
-def _thin_background(data, idxs, cap, rng):
+def _thin_background(data, idxs, cap, rng, bg_id=BACKGROUND):
     """Drop background primitives until a window fits the budget.
 
     A fixed window cannot adapt its size to density, so a dense one has to be
@@ -481,9 +502,12 @@ def _thin_background(data, idxs, cap, rng):
     are what the model is being asked to find; only the unlabelled clutter
     (dimension strings, hatching, notes) is sampled down.
     """
+    # bg_id, not a literal 3. Under the 43-class taxonomy background is 43, so
+    # "!= 3" meant "keep everything except sliding doors": the whole thinning
+    # budget went to real geometry and the primitive cap was blown silently.
     sem = data["semanticIds"]
-    keep = [i for i in idxs if sem[i] != 3]
-    bg = [i for i in idxs if sem[i] == 3]
+    keep = [i for i in idxs if sem[i] != bg_id]
+    bg = [i for i in idxs if sem[i] == bg_id]
     room = cap - len(keep)
     if room <= 0:
         return sorted(keep)          # already over budget on labelled work alone
@@ -535,7 +559,8 @@ def _fixed_windows(data, tile_units, min_prims, max_prims, overlap, seed=0):
         if len(idxs) < min_prims:
             continue
         if max_prims and len(idxs) > max_prims:
-            idxs = _thin_background(data, idxs, max_prims, rng)
+            idxs = _thin_background(data, idxs, max_prims, rng,
+                                    bg_id=TAXONOMIES[taxonomy][1])
         # Deliberately NOT grown to the geometry bbox the way the adaptive path
         # does: that fit is what makes tiles different sizes, which is the whole
         # thing being removed here. A primitive whose centroid sits inside but
@@ -584,7 +609,8 @@ def _split_region(data, idxs, ox, oy, w, h, max_prims, min_prims, depth, max_dep
 
 
 def tile_sheet(data, max_prims, min_prims=200, max_depth=8, overlap=0.0,
-               emit_page_max=0, tile_units=0.0, tile_doors=0.0):
+               emit_page_max=0, tile_units=0.0, tile_doors=0.0,
+               taxonomy="us4"):
     """Split a sheet into tiles, each small enough to train on.
 
     `overlap` (0-0.5) grows every tile outward by that fraction of its size, so
@@ -604,7 +630,7 @@ def tile_sheet(data, max_prims, min_prims=200, max_depth=8, overlap=0.0,
     """
     n = len(data["args"])
     if tile_doors:
-        est = _page_scale(data)
+        est = _page_scale(data, taxonomy=taxonomy)
         # No labelled objects means no scale reading; halving is the fallback,
         # and such a sheet has nothing to learn from anyway.
         tile_units = tile_doors * est if est else 0.0
@@ -745,14 +771,14 @@ def crop_tile_image(page_png, tile, out_png, size=980):
     return out_png
 
 
-def render_page(pdf_path, page_no, out_png, size=980):
+def render_page(pdf_path, page_no, out_png, size=980, timeout=600):
     """Rasterise one page with poppler's pdftoppm (GPL tool, invoked, not linked)."""
     stem = osp.splitext(out_png)[0]
     try:
         subprocess.run(["pdftoppm", "-png", "-r", "100", "-f", str(page_no),
                         "-l", str(page_no), "-scale-to", str(size),
                         pdf_path, stem],
-                       check=True, capture_output=True, timeout=180)
+                       check=True, capture_output=True, timeout=timeout)
     except Exception:
         return None
     for cand in (f"{stem}-{page_no}.png", f"{stem}-{page_no:02d}.png",
@@ -773,6 +799,13 @@ def main():
     ap.add_argument("--pdf", help="a single PDF instead of --pdf_dir")
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--render", action="store_true", help="rasterise a PNG per sheet")
+    ap.add_argument("--taxonomy", choices=sorted(TAXONOMIES), default="us4",
+                    help="label space: us4 = door/window/wall, "
+                         "arch = the 43-class space (default: us4)")
+    ap.add_argument("--pdf_list",
+                    help="file of PDF stems, one per line, restricting --pdf_dir")
+    ap.add_argument("--render_timeout", type=int, default=600,
+                    help="seconds allowed per page render (default: 600)")
     ap.add_argument("--img_size", type=int, default=980)
     ap.add_argument("--min_prims", type=int, default=500,
                     help="skip sheets with fewer primitives (covers, index pages)")
@@ -804,10 +837,37 @@ def main():
 
     import pikepdf
 
+    # render_page() swallows every exception and returns None, so a missing
+    # pdftoppm produces no error anywhere: no tile gets an "image" key, and
+    # svgnet/data/svg.py quietly feeds the image branch a blank white canvas
+    # for every tile in the corpus. Training then runs to convergence having
+    # learned nothing from the renders. Refuse up front instead.
+    if args.render:
+        import shutil as _shutil
+        if _shutil.which("pdftoppm") is None:
+            ap.error("--render needs poppler's pdftoppm on PATH. Install poppler, "
+                     "or drop --render -- otherwise every tile trains on a blank image.")
+
     os.makedirs(args.output_dir, exist_ok=True)
+    # Marker so the label editor and any downstream tool can tell which label
+    # space this corpus is in rather than guessing from the id range.
+    try:
+        with open(osp.join(args.output_dir, ".taxonomy"), "w") as fh:
+            fh.write(args.taxonomy + "\n")
+    except OSError:
+        pass
+
     pdfs = ([args.pdf] if args.pdf else
             sorted(osp.join(args.pdf_dir, f) for f in os.listdir(args.pdf_dir)
                    if f.lower().endswith(".pdf")))
+    if args.pdf_list:
+        with open(args.pdf_list) as fh:
+            # .strip() also drops the trailing CR of a CRLF list.
+            wanted = {ln.strip() for ln in fh if ln.strip()}
+        wanted |= {w[:-4] for w in wanted if w.lower().endswith(".pdf")}
+        pdfs = [p for p in pdfs
+                if osp.splitext(osp.basename(p))[0] in wanted]
+        print(f"--pdf_list restricts to {len(pdfs)} of {len(wanted)} named PDFs")
 
     kept = skipped = failed = 0
     for path in pdfs:
@@ -828,7 +888,8 @@ def main():
             name = f"{stem}_p{i:04d}"
             try:
                 png = osp.join(args.output_dir, f"{name}_s2.png") if args.render else None
-                data = parse_page(pdf, page, i, render_png=png)
+                data = parse_page(pdf, page, i, render_png=png,
+                                  taxonomy=args.taxonomy)
             except Exception:
                 skipped += 1
                 continue
@@ -846,18 +907,21 @@ def main():
             page_png = None
             if args.render:
                 tmp_png = osp.join(args.output_dir, f".{name}_page.png")
-                page_png = render_page(path, i, tmp_png, args.img_size * 3)
+                page_png = render_page(path, i, tmp_png, args.img_size * 3,
+                                       timeout=args.render_timeout)
 
             for suffix, tile in tile_sheet(data, args.max_prims,
                                            overlap=args.overlap,
                                            emit_page_max=args.emit_page_max,
                                            tile_units=args.tile_units,
-                                           tile_doors=args.tile_doors):
+                                           tile_doors=args.tile_doors,
+                                           taxonomy=args.taxonomy):
                 if len(tile["args"]) < args.min_prims:
                     skipped += 1
                     continue
                 sem = np.array(tile["semanticIds"])
-                if args.require_labels and not ((sem == 0) | (sem == 1)).any():
+                opening_ids = TAXONOMIES[args.taxonomy][2] + TAXONOMIES[args.taxonomy][3]
+                if args.require_labels and not np.isin(sem, opening_ids).any():
                     skipped += 1
                     continue
 
