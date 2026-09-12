@@ -21,6 +21,7 @@ import json
 import math
 import os.path as osp
 import random
+import sys
 from glob import glob
 
 import numpy as np
@@ -95,9 +96,21 @@ US4_CATEGORIES = [
     {"color": [0, 0, 0], "isthing": 0, "id": 4, "name": "bg"},
 ]
 
+# The 43-class Arch taxonomy: FloorPlanCAD's 35 with their ids untouched, plus
+# eight US construction-document families FloorPlanCAD has no class for. Defined
+# in dataset/taxonomy.py because the parsers must be able to read it without
+# importing torch, and duplicating it here is how the editor ended up painting
+# "background" with the id for "folding door".
+_DATASET_DIR = osp.join(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__)))),
+                        "dataset")
+if _DATASET_DIR not in sys.path:
+    sys.path.insert(0, _DATASET_DIR)
+from taxonomy import ARCH_CATEGORIES  # noqa: E402
+
 # Keyed by class count (excluding background), which is what the configs set as
 # model.semantic_classes.
 TAXONOMIES = {
+    len(ARCH_CATEGORIES) - 1: ARCH_CATEGORIES,  # 43 — Arch-43 (FpCAD + US)
     len(SVG_CATEGORIES) - 1: SVG_CATEGORIES,   # 35 — FloorPlanCAD / ArchCAD
     len(US4_CATEGORIES) - 1: US4_CATEGORIES,   #  3 — door / window / wall
 }
@@ -106,9 +119,22 @@ TAXONOMIES = {
 def get_categories(num_classes):
     """Category list for a given class count, background entry included.
 
-    Falls back to the FloorPlanCAD taxonomy so existing configs are unaffected.
+    Always returns exactly num_classes + 1 entries. The old version returned the
+    full 35-name list for any count it did not recognise, which silently
+    misaligned every per-class metric for configs/svg/svg_pointT.yaml (30
+    classes): point_wise_eval.py zips 35 names against a 30-slot confusion
+    matrix, so each class was reported under a different class's name.
     """
-    return TAXONOMIES.get(int(num_classes), SVG_CATEGORIES)
+    n = int(num_classes)
+    known = TAXONOMIES.get(n)
+    if known is not None:
+        return known
+    # Unknown count: take the first n classes of the widest taxonomy and give
+    # them a background entry, so names and slots still line up.
+    head = ARCH_CATEGORIES[:n]
+    bg = dict(ARCH_CATEGORIES[-1])
+    bg["id"] = n + 1
+    return head + [bg]
 
 # Per-primitive feature width. The point backbone concatenates the 3 xyz
 # coordinates in front of this, so configs must set in_channels = 3 + FEAT_DIM.
@@ -142,7 +168,8 @@ class SVGDataset(Dataset):
     CLASSES = tuple([x["name"] for x in SVG_CATEGORIES])
 
     def __init__(self, data_root, split, data_norm, aug, img_size=980,
-                 repeat=1, split_path=None, num_classes=NUM_CLASSES, logger=None):
+                 repeat=1, split_path=None, num_classes=NUM_CLASSES, logger=None,
+                 use_corrections=True):
         self.data_root = data_root
         self.split = split
         self.data_norm = data_norm
@@ -152,6 +179,10 @@ class SVGDataset(Dataset):
         # Background id follows the class count, so the same loader serves the
         # 35-class FloorPlanCAD data and the 3-class door/window taxonomy.
         self.num_classes = int(num_classes)
+        # Set data.*.use_corrections: False to train against the raw
+        # layer-derived labels, which is the ablation for 'did hand
+        # correction help'.
+        self.use_corrections = bool(use_corrections)
 
         self.data_list = sorted(glob(osp.join(data_root, split, "*_s2.json")))
         if not self.data_list:  # tolerate a flat directory with no split subdir
@@ -175,8 +206,83 @@ class SVGDataset(Dataset):
     # loading
     # ------------------------------------------------------------------ #
     @staticmethod
+    def _canon_dir(json_file):
+        """Directory holding the durable copy of this tile's sidecars.
+
+        dataset/split_us_plans.py rebuilds train/ and test/ with rmtree, and on
+        this checkout it falls back to copyfile rather than os.link, so anything
+        written beside a split copy is both a private duplicate and one re-split
+        away from deletion. all/ is the copy that survives, so corrections are
+        read from there whenever the corpus has one.
+        """
+        split_dir = osp.dirname(osp.abspath(json_file))
+        alld = osp.join(osp.dirname(split_dir), "all")
+        return alld if osp.isdir(alld) else split_dir
+
+    @staticmethod
+    def _sidecar(json_file, kind):
+        """Path to a per-tile sidecar, preferring the durable copy under all/."""
+        base = osp.basename(json_file).replace("_s2.json", f"_s2.{kind}.json")
+        canon = osp.join(SVGDataset._canon_dir(json_file), base)
+        if osp.exists(canon):
+            return canon
+        return osp.join(osp.dirname(osp.abspath(json_file)), base)
+
+    @staticmethod
+    def _apply_corrections(json_file, data, sem, num):
+        """Fold human corrections over the parser's layer-derived labels.
+
+        Two kinds, weakest first, because the brush is the exception handler for
+        the rule:
+
+          1. layermap  {layer name: class}   -- "everything on A-FLOR-PFIX is a
+             toilet". Keyed by CAD layer name, not primitive index, so one
+             decision covers every tile of a plan set and survives a re-parse
+             that renumbers primitives. A project-wide file applies first, then
+             the tile's own.
+          2. override  {primitive index: class} -- a single painted primitive.
+
+        Missing or malformed sidecars are ignored: a corrupt correction must not
+        take a training run down.
+        """
+        names = data.get("layerNames") or []
+        if names:
+            rules = {}
+            proj = osp.join(SVGDataset._canon_dir(json_file),
+                            "_project_layermap.json")
+            for path in (proj, SVGDataset._sidecar(json_file, "layermap")):
+                try:
+                    with open(path) as fh:
+                        rules.update(json.load(fh).get("rules", {}))
+                except (OSError, ValueError):
+                    pass
+            if rules:
+                lut = np.array([rules.get(n, -1) for n in names], dtype=np.int64)
+                lids = np.asarray(data["layerIds"], dtype=np.int64)[:num]
+                # Guard: a tile whose layerIds outrun its layerNames is
+                # malformed; leave it alone rather than index out of bounds.
+                if lids.size and int(lids.max()) < lut.size:
+                    hit = lut[lids] >= 0
+                    sem = np.where(hit, lut[lids], sem)
+
+        try:
+            with open(SVGDataset._sidecar(json_file, "override")) as fh:
+                over = json.load(fh)
+        except (OSError, ValueError):
+            return sem
+        for k, v in over.items():
+            try:
+                i = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < num:
+                sem[i] = int(v)
+        return sem
+
+    @staticmethod
     def load(data_root=None, file_name=None, idx=0, min_points=2048,
-             json_file=None, img_size=None, num_classes=NUM_CLASSES):
+             json_file=None, img_size=None, num_classes=NUM_CLASSES,
+             use_corrections=True):
         """Read one drawing.
 
         Accepts either an explicit `json_file`, or `data_root` + `file_name`
@@ -262,6 +368,14 @@ class SVGDataset(Dataset):
         semanticIds[:num] = np.array(data["semanticIds"])
         semanticIds = semanticIds.astype(np.int64)
 
+        # Human corrections from tools/label_editor.py. Until this existed,
+        # nothing read them: the editor wrote <stem>_s2.override.json and every
+        # training run loaded the raw semanticIds straight past it, so hand
+        # correction had literally no effect on the model.
+        if use_corrections:
+            semanticIds[:num] = SVGDataset._apply_corrections(
+                json_file, data, semanticIds[:num], num)
+
         instanceIds = np.full(max_num, -1)
         ins = np.array(data["instanceIds"]).astype(np.int64)
         # Offset instance ids per sample so they stay unique after batching.
@@ -311,7 +425,8 @@ class SVGDataset(Dataset):
         json_file = self.data_list[data_idx]
         coord, feat, label, lengths, layerIds, img, _, _ = SVGDataset.load(
             json_file=json_file, idx=idx, img_size=self.img_size,
-            num_classes=self.num_classes
+            num_classes=self.num_classes,
+            use_corrections=self.use_corrections,
         )
 
         if self.split == "train" and self.aug:
