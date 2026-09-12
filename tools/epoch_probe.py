@@ -35,17 +35,44 @@ from svgnet.data import build_dataset          # noqa: E402
 from svgnet.model.svgnet import SVGNet         # noqa: E402
 from svgnet.util import load_checkpoint        # noqa: E402
 
-NAMES = {0: "door", 1: "window", 2: "wall", 3: "bg"}
-COL = {0: (255, 0, 150), 1: (0, 90, 255), 2: (190, 90, 20), 3: (233, 233, 233)}
+# Names and colours follow the taxonomy the config selects, rather than a
+# hardcoded four. Under Arch-43 the literal ids 0-3 mean single/double/sliding/
+# folding door, so a fixed table would have mislabelled every probe line.
+NAMES, COL, REPORT = {}, {}, ()
+BG_ID, STUFF_IDS = 3, {2, 3}
+
+
+def set_taxonomy(num_classes):
+    """Bind NAMES/COL/REPORT for a class count. Call once, after the config."""
+    global NAMES, COL, REPORT
+    from svgnet.data.svg import get_categories
+    cats = get_categories(num_classes)
+    NAMES = {i: c["name"] for i, c in enumerate(cats)}
+    COL = {i: tuple(c["color"]) for i, c in enumerate(cats)}
+    bg = len(cats) - 1
+    COL[bg] = (233, 233, 233)          # background stays faint on the render
+    # The classes the one-line probe reports on. Every class would not fit and
+    # most are empty on a US corpus, so: openings first, then whatever else
+    # actually carries geometry.
+    if num_classes <= 4:
+        REPORT = tuple(range(min(3, num_classes)))
+    else:
+        REPORT = (0, 6, 32)            # single door, window, wall
+    return bg
 SIZE = 460
 
 
-def pick_tiles(ds, n):
-    """The same tiles every epoch, chosen for door/window content."""
+def pick_tiles(ds, n, opening=None):
+    """The same tiles every epoch, chosen for opening content.
+
+    Ranked on doors and windows because they are the sparse classes the probe
+    exists to watch; a tile of pure wall says nothing epoch to epoch.
+    """
+    opening = {0, 1} if opening is None else set(opening)
     scored = []
     for i, f in enumerate(ds.data_list):
         s = np.array(json.load(open(f))["semanticIds"])
-        scored.append((int(((s == 0) | (s == 1)).sum()), i))
+        scored.append((int(np.isin(s, list(opening)).sum()), i))
     scored.sort(reverse=True)
     step = max(1, len(scored) // (n * 4))
     return [i for _, i in scored[::step][:n]]
@@ -60,7 +87,10 @@ def draw(d, labels, stripe):
             if c != target:
                 continue
             xy = [(pts[k] * sx, SIZE - pts[k + 1] * sy) for k in range(0, 8, 2)]
-            dr.line(xy, fill=COL[c], width=1 if c == 3 else (2 if c == 2 else 3))
+            # Background hairline, stuff thin, things thick -- so a sparse
+            # door is visible against a wall that covers the sheet.
+            w = 1 if c == BG_ID else (2 if c in STUFF_IDS else 3)
+            dr.line(xy, fill=COL.get(c, (128, 128, 128)), width=w)
     dr.rectangle([0, 0, SIZE - 1, 5], fill=stripe)
     return img
 
@@ -75,12 +105,21 @@ def main():
     lg.warning = lambda *a, **k: None
 
     cfg = Munch.fromDict(yaml.safe_load(open(cfg_path).read()))
+    global BG_ID, STUFF_IDS
+    BG_ID = set_taxonomy(cfg.model.semantic_classes)
+    from svgnet.data.svg import get_categories
+    STUFF_IDS = {i for i, c in enumerate(get_categories(cfg.model.semantic_classes))
+                 if not c.get("isthing", 0)}
     model = SVGNet(cfg.model)
     load_checkpoint(ckpt, lg, model)
     model.eval()
 
     ds = build_dataset(cfg.data.test, lg)
-    idxs = pick_tiles(ds, n)
+    # Openings in whichever space: 0/1 under us4, the six door subtypes
+    # plus the four window classes and door-any under Arch-43.
+    opening = ({0, 1} if cfg.model.semantic_classes <= 4
+               else set(range(0, 10)) | {51})
+    idxs = pick_tiles(ds, n, opening)
 
     C = cfg.model.semantic_classes + 1
     tp = np.zeros(C); fp = np.zeros(C); fn = np.zeros(C)
@@ -126,7 +165,7 @@ def main():
 
     total = gt_n.sum()
     parts = []
-    for c in (0, 1, 2):
+    for c in REPORT:
         prec = 100 * tp[c] / max(1.0, tp[c] + fp[c])
         rec = 100 * tp[c] / max(1.0, tp[c] + fn[c])
         parts.append(f"{NAMES[c]} masked_iou={iou(m_tp[c], m_fp[c], m_fn[c]):5.1f} "
@@ -155,8 +194,10 @@ def main():
         if np.mean(ious) > best[0]:
             best = (float(np.mean(ious)), float(t), ious)
 
+    named = " ".join(f"{NAMES[c]}={best[2][k]:4.1f}"
+                     for k, c in enumerate(REPORT) if k < len(best[2]))
     sep = (f"best_thresholded_mIoU={best[0]:5.1f} at conf>={best[1]:.3f} "
-           f"(door={best[2][0]:4.1f} window={best[2][1]:4.1f} wall={best[2][2]:4.1f})")
+           f"({named})")
     print(f"{tag} | " + " | ".join(parts) + f" | {sep} | {img_path}", flush=True)
 
 
