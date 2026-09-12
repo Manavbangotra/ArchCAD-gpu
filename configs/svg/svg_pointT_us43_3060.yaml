@@ -86,7 +86,12 @@ criterion:
   # everything background is the cheapest move available to the model. That
   # is how the earlier CubiCasa run collapsed. criterion.py asserts the list
   # is exactly num_classes long, so a stale 3-entry list fails loudly.
-  class_weights: -1   # MEASURE FIRST: tools/corpus_weights.py --root dataset/us_plans/json5
+  class_weights: [0.475, 0.475, 0.475, 0.475, 0.475, 0.475, 0.314, 1.0, 1.0, 1.0, 0.845, 0.845, 0.845, 0.845, 0.845, 0.845, 0.3, 3.301, 0.3, 3.301, 3.301, 0.3, 0.3, 3.301, 0.3, 0.3, 0.3, 0.391, 2.172, 1.0, 1.0, 5.0, 0.3, 1.0, 0.662, 0.498, 1.384, 0.685, 0.3, 0.941, 0.881, 0.452, 0.3]
+  # Measured: tools/corpus_weights.py --root dataset/us_plans/json5 --split train
+  # 900 tiles, 6.1M primitives, sqrt-inverse frequency, mean 1, clipped 0.3-5.0.
+  # Classes with no support here get 1.0, which provably does not matter:
+  # F.cross_entropy weights by the target class, and a class that is never a
+  # target never contributes.
   num_points: -1
   contrast:
     num_classes: 44
@@ -108,6 +113,21 @@ data:
     data_root: 'dataset/us_plans/json5'
     repeat: 1
     split: "train"
+    # canonical, not bg.
+    #
+    # A CAD layer says "door" but not which of the six subtypes, so those
+    # primitives carry the coarse door-any id. Under coarse_policy: bg they read
+    # as background -- which would make this 43-class run WORSE at doors than the
+    # 3-class one it replaces, since the old taxonomy at least had a single
+    # "door" class. Same for A-FLOR-PFIX (fixture-any) and I-FURN
+    # (furniture-any); between them that is 5.7% of primitives.
+    #
+    # canonical assigns the group's modal member, so a US door trains as "single
+    # door". That is a real bias -- every double and sliding door in this corpus
+    # is labelled single -- and it is still better than teaching the model that
+    # doors are empty space. The honest fix is the marginal loss
+    # (-log sum of the group's probabilities), after which this becomes "keep".
+    coarse_policy: "canonical"
     data_norm: "mean"
     aug:
       aug_prob: 0.3
@@ -136,6 +156,21 @@ data:
     data_root: 'dataset/us_plans/json5'
     repeat: 1
     split: "test"
+    # canonical, not bg.
+    #
+    # A CAD layer says "door" but not which of the six subtypes, so those
+    # primitives carry the coarse door-any id. Under coarse_policy: bg they read
+    # as background -- which would make this 43-class run WORSE at doors than the
+    # 3-class one it replaces, since the old taxonomy at least had a single
+    # "door" class. Same for A-FLOR-PFIX (fixture-any) and I-FURN
+    # (furniture-any); between them that is 5.7% of primitives.
+    #
+    # canonical assigns the group's modal member, so a US door trains as "single
+    # door". That is a real bias -- every double and sliding door in this corpus
+    # is labelled single -- and it is still better than teaching the model that
+    # doors are empty space. The honest fix is the marginal loss
+    # (-log sum of the group's probabilities), after which this becomes "keep".
+    coarse_policy: "canonical"
     data_norm: "mean"
     aug: False
 
