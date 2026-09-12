@@ -67,13 +67,28 @@ RAW_TO_CLASS_ID = {
 }
 
 
+def bg_for(taxonomy):
+    """Background index for a label space. It is always the class count."""
+    if taxonomy == "us4":
+        return 3
+    if taxonomy == "arch":
+        from taxonomy import ARCH_BG
+        return ARCH_BG                      # 43
+    return BG_SEMANTIC_ID                   # 35
+
+
 def remap_semantic(raw_id, taxonomy="full"):
     """Raw SVG semantic-id -> 0-based training class index.
 
     taxonomy="full" gives FloorPlanCAD's 35 classes (background 35).
+    taxonomy="arch" gives the same 35 indices -- band A of Arch-43 IS
+        FloorPlanCAD, unchanged and in order, which is the whole point of the
+        numbering -- but background moves to 43. It has to: under Arch-43 the
+        index 35 means "column", so writing FloorPlanCAD's background there
+        would relabel every blank primitive in the dataset as a column.
     taxonomy="us4" collapses to door / window / wall / background, matching
-    dataset/taxonomy.py, so FloorPlanCAD, CubiCasa and US drawings can be mixed
-    in one training set.
+        dataset/taxonomy.py, so FloorPlanCAD, CubiCasa and US drawings can be
+        mixed in one training set.
 
     Anything unlabelled, out of range, or explicitly 0 becomes background.
     """
@@ -82,7 +97,7 @@ def remap_semantic(raw_id, taxonomy="full"):
         from taxonomy import from_floorplancad
         return from_floorplancad(class_id)
     if class_id <= 0:
-        return BG_SEMANTIC_ID
+        return bg_for(taxonomy)
     return class_id - 1  # 1-based id -> 0-based index
 
 
@@ -274,7 +289,7 @@ def parse_svg(svg_path, taxonomy="full"):
             # Primitives with no semantic-id at all are unannotated background;
             # that is the common case in these files.
             raw_sem = _get_attr(elem, ["semantic-id", "semanticId"], style, None)
-            bg = BG_SEMANTIC_ID if taxonomy == "full" else 3
+            bg = bg_for(taxonomy)
             sem = bg if raw_sem is None else remap_semantic(int(_float(raw_sem, 0)), taxonomy)
 
             ins = int(_float(_get_attr(elem, ["instance-id", "instanceId"], style, -1), -1))
@@ -367,7 +382,7 @@ def main():
     ap.add_argument("--render", action="store_true",
                     help="rasterise a PNG when no pre-rendered one is found")
     ap.add_argument("--img_size", type=int, default=980)
-    ap.add_argument("--taxonomy", choices=["full", "us4"], default="full",
+    ap.add_argument("--taxonomy", choices=["full", "arch", "us4"], default="full",
                     help="full = FloorPlanCAD's 35 classes; us4 = door/window/wall")
     ap.add_argument("--limit", type=int, default=None,
                     help="only convert the first N drawings (useful for smoke tests)")
