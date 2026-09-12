@@ -363,6 +363,14 @@ _ARCH_LAYER_RULES = [
     (re.compile(r"LAVT|LAVATORY|\bSINKS?\b", re.I), SINK),
     (re.compile(r"SANR[\s_-]*FIXT|PFIX|PLMB[\s_-]*FIXT|FLOR[\s_-]*FIXT"
                 r"|PLUMB[\s_-]*FIXT", re.I), FIXTURE_ANY),
+    # Bare "A-FIXTURE" / "AR-FIXTURE" / "-FIXT" / "FIXTURES". tools/audit_layers.py
+    # found these holding ~230k primitives -- about 7% of the corpus -- all
+    # labelled background, because the rule above demands SANR/PFIX/PLUMB. The
+    # negative lookahead keeps light fittings out: a bare FIXT rule would
+    # otherwise swallow E-FIXTURE, since the sanitary tier runs before the MEP
+    # block.
+    (re.compile(r"^(?!.*(?:LITE|LIGHT|ELEC|LUMIN|LAMP|^E[\s_-]))(?=.*FIXT)",
+                re.I), FIXTURE_ANY),
 
     # -- casework/millwork. FloorPlanCAD calls this "cabinet". ----------------
     (re.compile(r"CASEWORK|Q[\s_-]*CASE|CSWK|MILLWORK|MILL[\s_-]*WK"
