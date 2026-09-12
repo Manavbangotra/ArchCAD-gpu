@@ -423,3 +423,71 @@ def from_arch_layer(layer_name):
         if pattern.search(name):
             return cls
     return ARCH_BG
+
+
+# --------------------------------------------------------------------------- #
+# CubiCasa5K -> Arch-43
+# --------------------------------------------------------------------------- #
+# CubiCasa's <g class="..."> carries real per-object annotation -- "FixedFurniture
+# Sink1", "Stairs", "Railing" -- and the 4-class parser threw all of it away,
+# keeping only Door/Window/Wall and sending sinks, toilets, baths, stairs and
+# railings to background. In the wider space they have homes.
+#
+# Matched on the *whole* attribute, longest first, because the root token is only
+# the family: "FixedFurniture Sink1" heads with "FixedFurniture", and the member
+# is in the second word. Bathtub is tested before Bath for the obvious reason.
+_CUBI_RULES = [
+    ("bathtub", BATH_TUB),
+    ("sauna", FURNITURE_ANY),
+    ("sink", SINK),
+    ("toilet", TOILET),
+    ("urinal", URINAL),
+    ("bath", A_BATH),
+    ("shower", FIXTURE_ANY),        # no FloorPlanCAD class; the family is known
+    ("closet", WARDROBE),
+    ("wardrobe", WARDROBE),
+    ("stove", GAS_STOVE),
+    ("oven", GAS_STOVE),
+    ("fridge", REFRIGERATOR),
+    ("refrigerator", REFRIGERATOR),
+    ("washingmachine", WASHING_MACHINE),
+    ("dishwasher", APPLIANCE_ANY),
+    ("electricalappliance", ELECTRICAL),
+    ("chimney", ARCH_BG),           # explicit: no counterpart, not a fallthrough
+    ("fireplace", ARCH_BG),
+    ("stairs", STAIRS),
+    ("railing", RAILING),
+    ("door", DOOR_ANY),             # CubiCasa does not name the door subtype
+    ("window", A_WINDOW),
+    ("wall", A_WALL),
+]
+
+# Tokens that start a new object. Everything else -- Panel, Glass, Threshold,
+# PanelArea, Frame, Indicator, InnerPolygon -- is a part of the object above it
+# and inherits its class, which is what lets a door's swing arc come out as a
+# door rather than background.
+CUBI_ROOT_TOKENS = {"Door", "Window", "Wall", "Railing", "Stairs",
+                    "FixedFurniture", "FixedFurnitureSet"}
+
+
+def from_cubicasa_arch(class_attr):
+    """CubiCasa <g class="..."> -> Arch-43 index (or a band-C coarse id).
+
+    Room polygons ("Space Bedroom", "Space Kitchen") stay background on purpose.
+    They are area outlines that overlap every object inside them and have no
+    counterpart in FloorPlanCAD or in a US layer set, so giving them classes
+    would build a label space only one of the three data sources can populate --
+    which is the fragmentation this taxonomy exists to remove.
+    """
+    if not class_attr:
+        return ARCH_BG
+    flat = re.sub(r"[^a-z]", "", class_attr.lower())
+    if flat.startswith("space"):
+        return ARCH_BG
+    for token, cls in _CUBI_RULES:
+        if token in flat:
+            return cls
+    # A FixedFurniture whose member we do not recognise is still furniture.
+    if "fixedfurniture" in flat:
+        return FURNITURE_ANY
+    return ARCH_BG

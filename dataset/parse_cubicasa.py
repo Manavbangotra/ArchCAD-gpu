@@ -39,7 +39,15 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, osp.dirname(osp.abspath(__file__)))
 from svg_geom import (IDENTITY, apply, mat_mul, parse_transform,  # noqa: E402
                       path_segments, rejoin, segments_to_runs)
-from taxonomy import BACKGROUND, from_cubicasa  # noqa: E402
+from taxonomy import (ARCH_BG, BACKGROUND, CUBI_ROOT_TOKENS,  # noqa: E402
+                      from_cubicasa, from_cubicasa_arch)
+
+# Label spaces this parser can emit, mirroring dataset/parse_pdf_plans.py.
+# us4 stays the default so an existing command line reproduces its corpus.
+TAXONOMIES = {
+    "us4": (from_cubicasa, BACKGROUND, {"Door", "Window", "Wall"}),
+    "arch": (from_cubicasa_arch, ARCH_BG, CUBI_ROOT_TOKENS),
+}
 
 SVG_NS = "{http://www.w3.org/2000/svg}"
 CMD_LINE, CMD_ARC = 0, 1
@@ -128,12 +136,13 @@ def _element_runs(el, ctm):
     return []
 
 
-def parse_svg(svg_path, with_text=False):
+def parse_svg(svg_path, with_text=False, taxonomy="us4"):
     """One CubiCasa model.svg -> the loader's dict schema.
 
     Walks the tree rather than iterating <g> flatly, so that transforms compose
     and sub-parts inherit their parent object's class.
     """
+    mapper, bg_id, root_tokens = TAXONOMIES[taxonomy]
     root = ET.parse(svg_path).getroot()
     width, height = _svg_size(root)
 
@@ -168,7 +177,9 @@ def parse_svg(svg_path, with_text=False):
         widths.append(1.0)
         rgbs.append([0, 0, 0])
         sem_ids.append(cls)
-        ins_ids.append(instance if cls != BACKGROUND else -1)
+        # Coarse ids sit above background and carry no single class, so they
+        # get no instance either -- same rule the model applies.
+        ins_ids.append(instance if cls < bg_id else -1)
         # NOT the class. CubiCasa has no CAD layers, and setting layerId to the
         # class hands the answer straight to the model as an input. A per-group
         # counter is structural information a real drawing could also provide.
@@ -189,8 +200,8 @@ def parse_svg(svg_path, with_text=False):
         ctm = mat_mul(ctm, parse_transform(el.get("transform")))
 
         head = cls_attr.split()[0].strip() if cls_attr else ""
-        if head in _ROOT_TOKENS:
-            cls = from_cubicasa(cls_attr)
+        if head in root_tokens:
+            cls = mapper(cls_attr)
             counters["instance"] += 1
             instance = counters["instance"]
         if cls_attr:
@@ -206,7 +217,7 @@ def parse_svg(svg_path, with_text=False):
         for child in el:
             walk(child, ctm, cls, instance, group)
 
-    walk(root, IDENTITY, BACKGROUND, -1, 0)
+    walk(root, IDENTITY, bg_id, -1, 0)
 
     if not args:
         raise ValueError(f"no geometry found in {svg_path}")
@@ -227,7 +238,10 @@ def parse_svg(svg_path, with_text=False):
         "semanticIds": sem_ids,
         "instanceIds": ins_ids,
         "layerIds": layer_ids,
-        "n_layers": 4,
+        # layerIds here are a per-group counter, not the class -- see below --
+        # so the count is the number of distinct groups seen, not the class
+        # count. It was hardcoded to 4 when the taxonomy had 4 classes.
+        "n_layers": max(layer_ids) + 1 if layer_ids else 1,
     }
     if with_text:
         result["texts"] = extract_texts(root)
@@ -295,6 +309,10 @@ def main():
                     help="also store the drawing's text elements (not used by "
                          "the model; see extract_texts)")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--taxonomy", choices=sorted(TAXONOMIES), default="us4",
+                    help="label space: us4 = door/window/wall, arch = the "
+                         "43-class space that also carries sinks, toilets, "
+                         "baths, stairs and railings (default: us4)")
     ap.add_argument("--require_labels", action="store_true",
                     help="skip plans with no door or window geometry")
     args = ap.parse_args()
@@ -314,12 +332,16 @@ def main():
             continue
         stem = re.sub(r"[^A-Za-z0-9_.-]", "_", osp.relpath(d, args.data_dir).strip("/"))
         try:
-            data = parse_svg(svg, args.extract_text)
+            data = parse_svg(svg, args.extract_text, taxonomy=args.taxonomy)
         except Exception as exc:
             failed.append((stem, str(exc)))
             continue
 
-        if args.require_labels and not any(s in (0, 1) for s in data["semanticIds"]):
+        # Openings, in whichever label space: door ids plus window ids. Under
+        # arch a door may also arrive as the coarse door-any id.
+        opening = ({0, 1} if args.taxonomy == "us4"
+                   else set(range(0, 10)) | {51})
+        if args.require_labels and not any(s in opening for s in data["semanticIds"]):
             skipped += 1
             continue
 
