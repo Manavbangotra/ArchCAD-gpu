@@ -254,15 +254,49 @@ Architectural PDFs keep the drawing as real vector lines and tag each line with
 the original CAD layer name (`A-DOOR`, `A-GLAZING`, `A-WALL`). The parser reads
 those tags, so nothing has to be labelled by hand.
 
+**First, find out which plan sets are actually usable.** Most are not, and the
+reason is not obvious:
+
 ```bash
-python dataset/parse_pdf_plans.py \
-    --pdf_dir <folder of plan-set PDFs> \
-    --output_dir dataset/us_plans/json/train \
-    --require_labels --render --img_size 384
+python dataset/scan_ocg.py --pdf_dir <folder of plan-set PDFs> --out layered.txt
 ```
 
-Measured on the 59-planset corpus: 53 sets are vector, 23 carry layer names, and
-those produced **3,051 tiles containing 18,700 doors and 9,467 windows**.
+Measured on a 230-planset corpus:
+
+| | count |
+|---|---|
+| carry CAD layers | **90** |
+| flattened on export - no layers, nothing to label | **140** |
+| **distinct documents among the layered ones** | **26** |
+
+The second row surprises people: 140 of 230 PDFs have no optional-content groups
+at all, so every primitive comes back with no layer and the whole sheet labels as
+background. The third is worse - the 90 layered files are only 26 distinct
+documents, because the same PDF is re-uploaded under many project ids. One
+appears **42 times**. `scan_ocg.py` hashes contents and emits one stem per
+document, which matters because `split_us_plans.py` groups on the numeric project
+id, not on content: ingest the duplicates and the same building lands in train
+*and* test.
+
+Then convert, restricted to that list:
+
+```bash
+python dataset/parse_pdf_plans.py --pdf_dir <folder> --pdf_list layered.txt     --output_dir dataset/us_plans/json5/all --taxonomy arch --render     --img_size 980 --min_prims 500 --max_prims 6000 --overlap 0.15
+```
+
+`--taxonomy arch` selects the 43-class space (`dataset/taxonomy.py`). The old
+4-class space is still there as `--taxonomy us4`, and it is the default, so an
+existing command line reproduces its existing corpus exactly.
+
+**`--render` needs poppler's `pdftoppm` on PATH.** The parser refuses to start
+without it, deliberately: rendering used to fail silently, leaving every tile
+without an image, and `svgnet/data/svg.py` then fed the image branch a blank
+white canvas for the whole corpus. Training ran to convergence having learned
+nothing from the renders, with nothing in the logs saying so.
+
+Drive long runs one PDF at a time. `--skip_existing` keys on the PDF stem, not
+the page, so a run interrupted at page 200 of 357 skips that whole document on
+resume and silently loses the remaining 157 pages.
 
 Two things the parser handles that are easy to get wrong:
 
@@ -282,8 +316,12 @@ real. The prepared split is 16 buildings for training, 5 held out.
 
 ## Step 2 — Convert CubiCasa5K (optional pretraining)
 
+> **The `--split cubicasa` this used to document does not exist.**
+> `dataset/download_data.py --split` accepts only `train_1`, `train_2`,
+> `test` and `all`, all of which are FloorPlanCAD. Fetch CubiCasa5K from
+> Zenodo by hand.
+
 ```bash
-python dataset/download_data.py --split cubicasa    # or fetch from Zenodo
 python dataset/parse_cubicasa.py \
     --data_dir dataset/cubicasa/cubicasa5k \
     --split_file dataset/cubicasa/cubicasa5k/train.txt \
