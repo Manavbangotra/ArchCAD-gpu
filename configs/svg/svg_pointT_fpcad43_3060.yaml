@@ -1,0 +1,164 @@
+# FloorPlanCAD in the Arch-43 space, one RTX 3060 (12GB).
+#
+# Stage 1. This is the model worth warm-starting the US run from, and the reason
+# band A of Arch-43 keeps FloorPlanCAD's ids in their original order: the
+# classifier head transfers row for row instead of being dropped as a size
+# mismatch, which is what happened when the US config ran at 3 classes.
+#
+# The label space here is FloorPlanCAD's own 35 classes with background moved
+# from 35 to 43, because under Arch-43 the index 35 means "column" -- writing
+# FloorPlanCAD's background there would relabel every unlabelled primitive in
+# the dataset as a column. Ids 36-42 (the US families: column, framing, roof,
+# electrical, mechanical, pipe, site, equipment) have no support in this dataset
+# and simply never appear as a target. That is harmless: F.cross_entropy weights
+# by the target class, so a class that is never a target never contributes.
+#
+# Why this matters: US CAD layers can name a door but not which of the six
+# subtypes, and a furniture layer but not sofa vs bed. FloorPlanCAD is the only
+# source of real supervision for the fine classes, so pretraining here is what
+# gives the US model any chance at them.
+#
+# Convert first:
+#   python dataset/parse_FpCAD_svg.py --data_dir dataset/FloorplanCAD/train_1 #       --png_dir dataset/FloorplanCAD/train_1/coco_vis #       --output_dir dataset/FloorplanCAD/json/train --taxonomy arch
+#   (repeat for train_2 -> json/train and test -> json/test)
+#
+# LICENCE: FloorPlanCAD is research-oriented; check its terms before shipping a
+# model trained on it. It does not carry CubiCasa's CC BY-NC clause.
+
+model:
+  in_channels: 10
+  semantic_classes: 43
+  #decoder
+  num_decoders: 3
+  dropout: 0.1
+  pre_norm: False
+  num_heads: 8
+  shared_decoder: True
+  dim_feedforward: 512
+  hidden_dim: 256
+  num_queries: 800
+  gauss_scale: 1.0
+  normalize_pos_enc: False
+  #dn
+  scalar: 1
+  dn_mask_noise_scale: 0.0
+  dn_label_noise_ratio: 0.2
+  vision:
+    dim: 64
+    backbone: "hrnet48"
+    yaml: "configs/svg/hrnet48.yaml"
+    pretrained: "svgnet/pretrained/hrnet_ocr_cocostuff_3965_torch04.pth"
+
+matcher:
+  cost_class: 2.
+  cost_mask: 7.
+  cost_dice: 5.
+  num_points: -1
+
+criterion:
+  num_classes: 43
+  eos_coef: 0.05
+  losses:
+    - "labels"
+    - "masks"
+  ignore_label: -1
+  class_weights: -1
+  num_points: -1
+  contrast:
+    num_classes: 44 # bg+fg
+    stage: "Ua"
+    num_layers: 5
+    ftype: "f_out"
+    dist: "l2"
+    pos: "cnt"
+    contrast_func: "softnn"
+    sample: "label"
+    temperature: 2.0
+    weight: 8.0
+
+data:
+  train:
+    img_size: 700
+    type: 'svg'
+    data_root: 'dataset/FloorplanCAD/json'
+    repeat: 1
+    split: "train"
+    # Explicit: svgnet/data/svg.py defaults num_classes to 35 when the
+    # key is absent, which would make every id above 35 read as
+    # background -- silently, since nothing validates it.
+    num_classes: 43
+    data_norm: "mean"
+    aug:
+      aug_prob: 0.3
+      hflip: True
+      vflip: True
+      color: True
+
+      rotate:
+        enable: False
+        angle: [-180,180]
+      rotate2: False
+
+      scale:
+        enable: False
+        ratio: [0.5,1.5]
+
+      shift:
+        enable: False
+        scale: [-0.5,0.5]
+
+      cutmix:
+        enable: False
+        queueK: 4
+        relative_shift: [-0.5,0.5]
+
+  test:
+    img_size: 700
+    type: 'svg'
+    data_root: 'dataset/FloorplanCAD/json'
+    repeat: 1
+    split: "test"
+    # Explicit: svgnet/data/svg.py defaults num_classes to 35 when the
+    # key is absent, which would make every id above 35 read as
+    # background -- silently, since nothing validates it.
+    num_classes: 43
+    data_norm: "mean"
+    aug: False
+
+dataloader:
+  train:
+    batch_size: 1
+    num_workers: 4
+  test:
+    batch_size: 1
+    num_workers: 4
+
+optimizer:
+  type: 'AdamW'
+  lr: 0.0002
+  weight_decay: 0.1
+  weight_decay_embed: 0.1
+  decoder_multiplier: 1.0
+  clip_gradients_enabled: True
+  clip_gradients_type: "full_model"
+  clip_gradients_norm_type: 2.0
+  clip_gradients_value: 2.0
+
+scheduler:
+  type: 'cosine'
+  warmup_epochs: 3
+  min_lr: 1e-7
+
+fp16: False
+epochs: 50
+step_epoch: 2
+save_freq: 10
+pretrain: ''
+work_dir: './work_dirs/fpcad43_3060'
+
+# 8 GPUs x batch 2 = effective batch 16 already; no accumulation needed.
+accumulate_steps: 16
+
+# Mid-epoch rolling checkpoint every N iterations, so a power cut costs minutes
+# rather than a whole epoch. Tune N from the smoke-test step time (~10-15 min).
+save_interval_iters: 2000
