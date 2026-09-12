@@ -203,3 +203,18 @@ dataset/FloorplanCAD/val/
 
 
 
+
+# Converted corpora. json4 (the 3-class corpus) is already tracked and is left
+# alone deliberately -- untracking it would not shrink .git, which already
+# carries its history, and that is a decision for a human. But json5 is the
+# 43-class rebuild and lands at roughly 24 GB, which GitHub will refuse and
+# which would make the repo unusable to clone. Code in git, corpora on disk.
+dataset/us_plans/json5/
+dataset/cubicasa/json/
+dataset/FloorplanCAD/json/
+
+# Regenerable caches. The autoalign fit is memoised per tile (~3 MB across the
+# corpus) and is recomputed on demand if absent; the hand-made .align.json and
+# .override.json next to it are human work and ARE tracked.
+*.autoalign.json
+dataset/us_plans/*/.editor_index.json
