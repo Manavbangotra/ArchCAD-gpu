@@ -33,16 +33,64 @@ from collections import Counter, defaultdict
 PROJECT = re.compile(r"^(project_\d+)_")
 NAMES = {0: "door", 1: "window", 2: "wall", 3: "bg"}
 
+# The split is stratified on the opening mix, which is still the right question
+# under the wider taxonomy -- doors and windows are the sparse classes whose
+# balance actually moves the score. But their ids move, so the buckets are
+# derived from the taxonomy rather than hardcoded: under Arch-43 a door is any
+# of the six subtypes plus the coarse door-any id, and "wall" covers wall and
+# curtain wall.
+def _buckets(taxonomy):
+    if taxonomy == "arch":
+        import taxonomy as tx
+        door = set(range(0, 6)) | {tx.DOOR_ANY}
+        window = set(range(6, 10))
+        wall = {tx.A_WALL, tx.CURTAIN_WALL}
+        bg = {tx.ARCH_BG}
+    else:
+        door, window, wall, bg = {0}, {1}, {2}, {3}
+    out = {}
+    for ids, name in ((door, "door"), (window, "window"), (wall, "wall"), (bg, "bg")):
+        for i in ids:
+            out[i] = name
+    return out
+
+
+def detect_taxonomy(root):
+    """Which label space this corpus is in.
+
+    dataset/parse_pdf_plans.py drops a .taxonomy marker beside the tiles. Older
+    corpora predate it and are us4 by construction.
+    """
+    for cand in (osp.join(root, ".taxonomy"), osp.join(root, "all", ".taxonomy")):
+        try:
+            with open(cand) as fh:
+                name = fh.read().strip()
+            if name:
+                return name
+        except OSError:
+            pass
+    return "us4"
+
+# Suffixes re-linked into the split alongside the tile itself. The splits are
+# rebuilt with rmtree, so anything not listed here is destroyed on every re-split
+# -- which is how 2,966 autoalign caches, 59 hand alignments and the only human
+# correction in the repo came within one command of being lost. The canonical
+# copy of every sidecar lives in all/; these links are for tools that open a
+# tile through its split path.
+SIDECARS = (".png", ".autoalign.json", ".align.json", ".override.json",
+            ".verdict.json", ".regions.json", ".layermap.json")
+
 
 def project_of(filename):
     m = PROJECT.match(filename)
     return m.group(1) if m else filename.split("_p")[0]
 
 
-def scan(all_dir):
-    """project -> {tiles, door, window, wall, files}"""
-    stats = defaultdict(lambda: {"tiles": 0, "files": [],
-                                 "door": 0, "window": 0, "wall": 0, "bg": 0})
+def scan(all_dir, buckets=None):
+    """project -> {tiles, door, window, wall, bg, other, files}"""
+    buckets = _buckets('us4') if buckets is None else buckets
+    stats = defaultdict(lambda: {"tiles": 0, "files": [], "door": 0,
+                                 "window": 0, "wall": 0, "bg": 0, "other": 0})
     for f in sorted(os.listdir(all_dir)):
         if not f.endswith("_s2.json"):
             continue
@@ -54,8 +102,8 @@ def scan(all_dir):
             c = Counter(json.load(open(osp.join(all_dir, f)))["semanticIds"])
         except Exception:
             continue
-        for k, n in NAMES.items():
-            s[n] += c.get(k, 0)
+        for k, n in c.items():
+            s[buckets.get(k, 'other')] += n
     return stats
 
 
@@ -124,10 +172,15 @@ def main():
                          "corpus -- and without a cap the model mostly learns that "
                          "firm's drafting conventions rather than what a door is.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--taxonomy", choices=("us4", "arch"),
+                    help="override the .taxonomy marker written by the parser")
     args = ap.parse_args()
 
     all_dir = osp.join(args.root, "all")
-    stats = scan(all_dir)
+    tax = args.taxonomy or detect_taxonomy(args.root)
+    buckets = _buckets(tax)
+    print(f"taxonomy: {tax}")
+    stats = scan(all_dir, buckets)
 
     if args.cap:
         rng = random.Random(args.seed)
@@ -139,7 +192,7 @@ def main():
             dropped = s["tiles"] - args.cap
             s["files"] = [f for f in s["files"] if f in keep]
             s["tiles"] = args.cap
-            for k in ("door", "window", "wall", "bg"):
+            for k in ("door", "window", "wall", "bg", "other"):
                 s[k] = int(s[k] * scale)      # counts are only used for balancing
             print(f"[cap] {key}: dropped {dropped} tiles, kept {args.cap}")
     print(f"{len(stats)} projects, {sum(s['tiles'] for s in stats.values())} tiles\n")
@@ -162,12 +215,12 @@ def main():
     for key, s in stats.items():
         split = "test" if key in test else "train"
         for f in s["files"]:
-            for name in (f, f.replace("_s2.json", "_s2.png")):
+            for name in (f, *(f.replace("_s2.json", "_s2" + suf) for suf in SIDECARS)):
                 src = osp.join(all_dir, name)
                 if osp.exists(src):
                     link(src, osp.join(args.root, split, name))
             tiles[split] += 1
-        for k in ("door", "window", "wall", "bg"):
+        for k in ("door", "window", "wall", "bg", "other"):
             counts[split][k] += s[k]
 
     print()

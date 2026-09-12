@@ -6,9 +6,11 @@ right: a firm may draw a door on a wall layer, or use a layer name the taxonomy
 does not recognise. This lets you look at any tile, see the labels on the sheet
 they came from, and fix what is wrong.
 
-Corrections are written to `<stem>_s2.override.json` next to the tile -- the
-original file is never modified, so a correction survives a corpus rebuild only
-if you keep the override files, and can always be thrown away.
+Corrections are written to `<stem>_s2.override.json` beside the canonical tile
+under all/ -- the original file is never modified, so a correction survives a
+corpus rebuild only if you keep the override files, and can always be thrown
+away. They are written under all/ rather than beside the split copy because
+split_us_plans.py rmtree()s train/ and test/ on every re-split.
 
     python tools/label_editor.py --root dataset/us_plans/json4 --port 8900
 
@@ -99,7 +101,7 @@ def _autofit(json_path, png_path, margin=0.10):
 
 def auto_align(tile_path):
     """`_autofit` once per tile, remembered on disk -- the fit costs seconds."""
-    cache = tile_path.replace("_s2.json", "_s2.autoalign.json")
+    cache = _side(tile_path, "autoalign")
     if osp.exists(cache):
         try:
             return json.load(open(cache)) or None
@@ -120,13 +122,27 @@ def auto_align(tile_path):
 
 
 def _side(tile_path, kind):
-    """Path for a sidecar file, following symlinks to the real tile.
+    """Path for a sidecar file, resolved to the durable copy under all/.
 
     The plans and rejected views are symlink trees over one corpus, so a verdict
     saved in one has to be visible in the other; writing beside the link would
-    give each view its own private answer.
+    give each view its own private answer. realpath handles that case.
+
+    It does not handle the split dirs, because split_us_plans.py falls back to
+    copyfile when os.link fails, and on this checkout every train/ and test/ tile
+    is a copy with its own inode -- realpath resolves to the copy, not to all/.
+    Worse, the splitter rmtree()s those dirs on every re-split, so a sidecar left
+    beside a split copy is deleted the next time anyone re-splits. all/ is the one
+    location that survives, so sidecars are read and written there whenever the
+    tile has a counterpart in it.
     """
-    return osp.realpath(tile_path).replace("_s2.json", f"_s2.{kind}.json")
+    real = osp.realpath(tile_path)
+    side = real.replace("_s2.json", f"_s2.{kind}.json")
+    if ROOT:
+        canon = osp.join(ROOT, "all", osp.basename(real))
+        if osp.exists(canon):
+            return canon.replace("_s2.json", f"_s2.{kind}.json")
+    return side
 
 
 def _relink(split, name, verdict):
@@ -256,7 +272,7 @@ def summary(split, name):
     except Exception:
         return None
     c = Counter(d["semanticIds"])
-    ov = p.replace("_s2.json", "_s2.override.json")
+    ov = _side(p, "override")
     return {"split": split, "name": name,
             "project": (PROJ.match(name).group(1) if PROJ.match(name) else "?"),
             "n": len(d["semanticIds"]),
@@ -312,9 +328,9 @@ class Handler(BaseHTTPRequestHandler):
             split, name = q["split"][0], unquote(q["name"][0])
             p = osp.join(ROOT, split, name)
             d = json.load(open(p))
-            ovp = p.replace("_s2.json", "_s2.override.json")
+            ovp = _side(p, "override")
             over = json.load(open(ovp)) if osp.exists(ovp) else {}
-            alp = p.replace("_s2.json", "_s2.align.json")
+            alp = _side(p, "align")
             align = json.load(open(alp)) if osp.exists(alp) else None
             if align is None:
                 pj = osp.join(ROOT, "_project_align.json")
@@ -423,7 +439,7 @@ class Handler(BaseHTTPRequestHandler):
                 json.dump(allp, open(pj, "w"))
                 return self._send(200, {"scope": "project", "project": payload["project"], **al})
             p = osp.join(ROOT, payload["split"], payload["name"])
-            alp = p.replace("_s2.json", "_s2.align.json")
+            alp = _side(p, "align")
             if ident:
                 if osp.exists(alp):
                     os.remove(alp)
@@ -433,7 +449,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/api/save":
             p = osp.join(ROOT, payload["split"], payload["name"])
-            ovp = p.replace("_s2.json", "_s2.override.json")
+            ovp = _side(p, "override")
             over = {str(k): int(v) for k, v in payload.get("overrides", {}).items()}
             if over:
                 json.dump(over, open(ovp, "w"))
@@ -949,7 +965,7 @@ def _warm_all():
     import multiprocessing as mp
     paths = [osp.join(ROOT, sp, nm) for sp, nm in tiles()]
     todo = [t for t in paths
-            if not osp.exists(t.replace("_s2.json", "_s2.autoalign.json"))]
+            if not osp.exists(_side(t, "autoalign"))]
     if not todo:
         return
     print(f"fitting {len(todo)} tiles in the background ...", flush=True)
