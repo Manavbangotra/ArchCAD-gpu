@@ -107,6 +107,17 @@ def main():
         check(sem_of(jf), [26, 26, 0, 0, 43, 43],
               "out-of-range and non-numeric override keys are ignored")
 
+        # -- coarse band-C ids collapse according to coarse_policy ----------
+        # The classifier head has no column for a coarse id, so "bg" is the only
+        # correct default until the marginal loss lands.
+        cd = osp.join(root, "coarse", "all")
+        cj = write_tile(cd, [51, 51, 43, 43, 43, 43], [0] * 6, ["A-DOOR"])
+        check(sem_of(cj), [43, 43, 43, 43, 43, 43], "coarse_policy=bg (default)")
+        check(sem_of(cj, coarse_policy="keep"), [51, 51, 43, 43, 43, 43],
+              "coarse_policy=keep passes the coarse id through")
+        check(sem_of(cj, coarse_policy="canonical"), [0, 0, 43, 43, 43, 43],
+              "coarse_policy=canonical takes the group's modal member")
+
         # -- a tile whose layerIds outrun its layerNames is left alone --------
         bad = write_tile(osp.join(root, "bad", "all"), [43] * 6,
                          [0, 0, 1, 1, 7, 7], ["A-FLOR-PFIX", "A-DOOR"])

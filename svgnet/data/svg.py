@@ -169,7 +169,7 @@ class SVGDataset(Dataset):
 
     def __init__(self, data_root, split, data_norm, aug, img_size=980,
                  repeat=1, split_path=None, num_classes=NUM_CLASSES, logger=None,
-                 use_corrections=True):
+                 use_corrections=True, coarse_policy="bg"):
         self.data_root = data_root
         self.split = split
         self.data_norm = data_norm
@@ -183,6 +183,7 @@ class SVGDataset(Dataset):
         # layer-derived labels, which is the ablation for 'did hand
         # correction help'.
         self.use_corrections = bool(use_corrections)
+        self.coarse_policy = str(coarse_policy)
 
         self.data_list = sorted(glob(osp.join(data_root, split, "*_s2.json")))
         if not self.data_list:  # tolerate a flat directory with no split subdir
@@ -282,7 +283,7 @@ class SVGDataset(Dataset):
     @staticmethod
     def load(data_root=None, file_name=None, idx=0, min_points=2048,
              json_file=None, img_size=None, num_classes=NUM_CLASSES,
-             use_corrections=True):
+             use_corrections=True, coarse_policy="bg"):
         """Read one drawing.
 
         Accepts either an explicit `json_file`, or `data_root` + `file_name`
@@ -376,6 +377,29 @@ class SVGDataset(Dataset):
             semanticIds[:num] = SVGDataset._apply_corrections(
                 json_file, data, semanticIds[:num], num)
 
+        # Coarse labels (band C: door-any, furniture-any, ...) say which family a
+        # primitive belongs to but not which member. They live above background
+        # by construction, so every `>= num_classes` guard in the model already
+        # treats them as background -- but "already treats them as" is not a
+        # contract, so make it one here and let the config say which it wants:
+        #
+        #   "bg"        collapse to background. The default, and the only
+        #               correct choice until the marginal loss lands: the
+        #               classifier head has no column for a coarse id.
+        #   "canonical" replace with the group's modal member. Cheap, and a lie
+        #               for every non-modal member.
+        #   "keep"      pass through, for the marginal loss.
+        if coarse_policy != "keep":
+            over = semanticIds > int(num_classes)
+            if over.any():
+                if coarse_policy == "canonical":
+                    from taxonomy import canonical
+                    for i in np.flatnonzero(over):
+                        c = canonical(int(semanticIds[i]))
+                        semanticIds[i] = c if c < int(num_classes) else int(num_classes)
+                else:
+                    semanticIds[over] = int(num_classes)
+
         instanceIds = np.full(max_num, -1)
         ins = np.array(data["instanceIds"]).astype(np.int64)
         # Offset instance ids per sample so they stay unique after batching.
@@ -427,6 +451,7 @@ class SVGDataset(Dataset):
             json_file=json_file, idx=idx, img_size=self.img_size,
             num_classes=self.num_classes,
             use_corrections=self.use_corrections,
+            coarse_policy=self.coarse_policy,
         )
 
         if self.split == "train" and self.aug:
