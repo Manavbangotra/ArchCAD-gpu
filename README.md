@@ -205,6 +205,56 @@ bash tools/test_dist.sh
 ```
 
 
+## 🏗️ Construction takeoff: FloorPlanCAD + CubiCasa + US plan sets -> JSON
+
+One Arch-43 model (FloorPlanCAD's 35 classes + column, framing, roof, electrical,
+mechanical, pipe, site, equipment) trained on all three sources, and a tool that
+turns a plan-set PDF into a takeoff JSON.
+
+**Checks** (no pytest; plain scripts): `python tools/run_checks.py`
+
+**Training on one RTX 3060, Windows (PowerShell)**
+
+```powershell
+$env:PYTHONPATH='.'; $env:PYTHONUTF8='1'
+# Stage 1: FloorPlanCAD only -- the one source that labels which toilet, which door
+python tools/train.py configs/svg/svg_pointT_fpcad43_3060.yaml --exp_name stage1 --work_dir work_dirs/fpcad43_3060
+# Stage 2: joint, from Stage 1's best.pth (US tiles picked by tools/select_tiles.py)
+python tools/select_tiles.py --root dataset/us_plans/json5
+python tools/train.py configs/svg/svg_pointT_joint43_3060.yaml --exp_name joint43 --work_dir work_dirs/joint43
+# resume either with --resume <work_dir>/latest.pth
+```
+
+Sources label different things, so the loss is told what each one labels
+(`dataset/taxonomy.py` `ANNOTATED`): an unmatched prediction of a class a source
+never labels is not pushed to background, and coarse CAD-layer labels
+(door-any, fixture-any) are scored on the sum of their members
+(`svgnet/model/label_space.py`). Validation reports each source separately.
+
+**Takeoff**
+
+```powershell
+# with a trained model
+python tools/takeoff.py --pdf plans.pdf --config configs/svg/svg_pointT_joint43_3060.yaml `
+    --checkpoint work_dirs/joint43/best.pth --schedules <Schedule-detection planset json> `
+    --overlay_dir out/overlays --out out/plans.takeoff.json
+# baseline from the PDF's CAD layers, no model
+python tools/takeoff.py --pdf plans.pdf --labels layers --out out/plans.layers.json
+# score against a verified takeoff (CSV: project,category,item,count,area_sqft)
+python tools/eval_takeoff.py --pred out/plans.takeoff.json --truth verified.csv
+```
+
+The JSON follows bim-ai's field names (millimetres, floor-local Y-up): doors and
+windows with type mark, width and schedule row; rooms with name, CubiCasa room
+group, polygon and area; walls; fixtures, appliances and furniture; per-viewport
+scale provenance; `pdf_bbox` to find every item on the sheet. Totals count floor,
+enlarged and untitled plans only -- reflected ceiling, lighting, MEP, framing,
+roof and site plans redraw the same doors and are reported separately.
+
+**Licensing.** The repository LICENSE is academic-only, FloorPlanCAD is
+research-use and CubiCasa5K is CC BY-NC 4.0. A model trained on them is not
+cleared for commercial use.
+
 ## TODO list:
 - [ ] Release our tools **CADParser** for CAD processing.
 - [ ] Release a highly optimized version of **DPSS** Framework.

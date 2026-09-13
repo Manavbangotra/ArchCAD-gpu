@@ -78,6 +78,9 @@ class TileModel:
         from svgnet.util import get_device, get_root_logger, load_checkpoint
 
         self.torch = torch
+        if device:
+            # cuda_cast moves every model input to get_device(), which reads this.
+            os.environ["ARCHCAD_DEVICE"] = str(device)
         with open(config, encoding="utf-8") as f:
             self.cfg = Munch.fromDict(yaml.safe_load(f))
         self.device = torch.device(device) if device else get_device()
@@ -103,7 +106,8 @@ class TileModel:
                  torch.IntTensor([coord.shape[0]]), torch.FloatTensor(lengths),
                  torch.LongTensor(layer_ids), [self.tf(img)], [torch.FloatTensor(centers)],
                  json_file)
-        with torch.no_grad(), torch.autocast(self.device.type, enabled=bool(self.cfg.get("fp16"))):
+        fp16 = bool(self.cfg.get("fp16")) and self.device.type == "cuda"
+        with torch.no_grad(), torch.autocast(self.device.type, enabled=fp16):
             res = self.model(batch, return_loss=False)
         return res["instances"]
 
