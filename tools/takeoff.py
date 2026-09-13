@@ -34,7 +34,7 @@ import numpy as np  # noqa: E402
 
 from takeoff import document, openings as openings_mod, rooms as rooms_mod  # noqa: E402
 from takeoff.scale import page_scales  # noqa: E402
-from takeoff.stitch import objects_from_labels, stitch  # noqa: E402
+from takeoff.stitch import objects_from_labels, split_connected, stitch  # noqa: E402
 
 
 def text_layer(doc_page, box, origin):
@@ -213,6 +213,9 @@ def main():
                 objects, n_tiles = page_objects(data, a.pdf, i, model, tmp)
 
             args = data["args"]
+            # Same tolerance the parser clusters layer instances with.
+            objects = split_connected(objects, args, document.BARRIER_CLASSES - document.WINDOW_CLASSES,
+                                      0.004 * max(data["width"], data["height"]))
             ops = openings_mod.build_openings(objects, args, document.OPENING_KINDS, scales.at,
                                               words, schedule)
 

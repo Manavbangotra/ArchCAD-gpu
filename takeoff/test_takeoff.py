@@ -74,6 +74,14 @@ def test_stitch():
     objs, _ = stitch.stitch(10, [("_t000", a_idx, [d1, d2])])
     check(len(objs) == 2, "neighbouring doors in one tile are not merged")
 
+    # A stitched wall covering two separate drawings splits back into runs.
+    args = [[0, 0, 0, 0, 10, 0, 10, 0], [10, 0, 10, 0, 10, 10, 10, 10],      # plan wall run
+            [500, 0, 500, 0, 510, 0, 510, 0]]                               # elevation, far away
+    wall = stitch.PageObject(32, 0.9, np.array([0, 1, 2]), ["_t000"])
+    parts = stitch.split_connected([wall], args, {32}, tol=1.0)
+    check(sorted(p.prims.tolist() for p in parts) == [[0, 1], [2]],
+          f"a page-wide wall splits into connected runs: {[p.prims.tolist() for p in parts]}")
+
 
 def _seg(x0, y0, x1, y1):
     return [x0, y0, x0, y0, x1, y1, x1, y1]

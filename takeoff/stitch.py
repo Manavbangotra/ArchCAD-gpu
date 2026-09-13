@@ -129,3 +129,30 @@ def objects_from_labels(sem, ins, bg_id, score=1.0):
     for (lab, _), prims in sorted(keys.items()):
         objects.append(PageObject(lab, score, np.array(prims, dtype=np.int64), ["labels"]))
     return objects
+
+
+def split_connected(objects, args, labels, tol):
+    """Split objects of the given classes into geometrically connected pieces.
+
+    Walls and railings are "stuff": one mask per class per tile, which the
+    stitcher then joins across tiles -- so every wall on the sheet, plan and
+    elevations alike, became a single object whose centre sat in one viewport
+    and took that viewport's scale. Splitting by endpoint connectivity (the
+    same rule parse_pdf_plans.cluster_instances uses) restores one object per
+    wall run, each in its own drawing.
+    """
+    import os.path as osp
+    import sys
+    sys.path.insert(0, osp.join(osp.dirname(osp.dirname(osp.abspath(__file__))), "dataset"))
+    from parse_pdf_plans import cluster_instances
+
+    out = []
+    for ob in objects:
+        if ob.label not in labels or ob.prims.size < 2:
+            out.append(ob)
+            continue
+        prims = [{"pts": args[i]} for i in ob.prims.tolist()]
+        comp = cluster_instances(prims, np.zeros(len(prims), dtype=np.int64), tol, bg_id=-1)
+        for c in np.unique(comp):
+            out.append(PageObject(ob.label, ob.score, ob.prims[comp == c], ob.sources))
+    return out
