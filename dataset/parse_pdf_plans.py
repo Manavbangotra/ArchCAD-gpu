@@ -467,6 +467,10 @@ def _emit_tile(data, idxs, ox, oy, tw, th):
     tile["origin"] = [data["origin"][0] + ox, data["origin"][1] + oy]
     tile["page_box"] = data["page_box"]
     tile["rotate"] = data.get("rotate", 0)
+    # Page-primitive index of every tile primitive. Tiles overlap and `_full`
+    # repeats the page, so this is what lets predictions be voted back onto the
+    # page and counted once. Bookkeeping, like origin: dropped before writing.
+    tile["idxs"] = list(idxs)
     return tile
 
 
@@ -528,7 +532,8 @@ def _thin_background(data, idxs, cap, rng, bg_id=BACKGROUND):
     return sorted(keep + bg)
 
 
-def _fixed_windows(data, tile_units, min_prims, max_prims, overlap, seed=0):
+def _fixed_windows(data, tile_units, min_prims, max_prims, overlap, seed=0,
+                   taxonomy="us4"):
     """Cut the sheet into windows of one constant size.
 
     `_split_region` sizes tiles by primitive count, so a dense plan area ends up
@@ -645,7 +650,8 @@ def tile_sheet(data, max_prims, min_prims=200, max_depth=8, overlap=0.0,
         # and such a sheet has nothing to learn from anyway.
         tile_units = tile_doors * est if est else 0.0
     if tile_units:
-        yield from _fixed_windows(data, tile_units, min_prims, max_prims, overlap)
+        yield from _fixed_windows(data, tile_units, min_prims, max_prims, overlap,
+                                  taxonomy=taxonomy)
         if emit_page_max and n <= emit_page_max:
             whole = _emit_tile(data, list(range(n)), 0.0, 0.0,
                                data["width"], data["height"])
@@ -939,7 +945,7 @@ def main():
                     tile_png = osp.join(args.output_dir, f"{name}{suffix}_s2.png")
                     if crop_tile_image(page_png, tile, tile_png, args.img_size):
                         tile["image"] = osp.basename(tile_png)
-                for k in ("origin", "page_box"):
+                for k in ("origin", "page_box", "idxs"):
                     tile.pop(k, None)   # bookkeeping only; not part of the schema
 
                 with open(osp.join(args.output_dir, f"{name}{suffix}_s2.json"), "w") as f:

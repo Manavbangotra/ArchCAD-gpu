@@ -23,6 +23,7 @@ ROOT = osp.dirname(osp.dirname(osp.abspath(__file__)))
 CHECKS = [
     ("taxonomy and CAD-layer rules", "dataset/test_taxonomy.py", False),
     ("CubiCasa label spaces", "dataset/test_cubicasa.py", False),
+    ("room tags parse", "dataset/test_room_names.py", False),
     ("corrections reach the loader", "dataset/test_corrections.py", True),
     ("loader/editor/weights agree", "dataset/test_merge_agreement.py", True),
 ]
