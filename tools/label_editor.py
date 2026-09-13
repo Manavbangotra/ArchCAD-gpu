@@ -327,18 +327,37 @@ COARSE = {}             # coarse id -> (name, [member ids])
 
 
 def set_taxonomy(name):
-    """Switch the editor's vocabulary. Called once, before the page is served."""
+    """Switch the editor's vocabulary. Called once, before the page is served.
+
+    CLASSES is keyed by class id rather than being a dense list, because the ids
+    are not contiguous: Arch-43 occupies 0..43 and the coarse band-C ids sit at
+    51..55. A dense array left CLASSES[51] undefined, so every door, fixture and
+    piece of furniture fell through to the background colour and rendered as
+    blank space -- 6.3% of the corpus, and the most valuable 6.3%.
+    """
     global TAXONOMY, CLASSES, FAMILIES, BG, COARSE
     TAXONOMY = name
     if name == "arch":
-        CLASSES = [(c["name"], TX.ARCH_HEX[i])
-                   for i, c in enumerate(TX.ARCH_CATEGORIES)]
+        CLASSES = {i: (c["name"], TX.ARCH_HEX[i])
+                   for i, c in enumerate(TX.ARCH_CATEGORIES)}
         FAMILIES = [(fam, list(ids)) for fam, ids in TX.FAMILIES]
         BG = TX.ARCH_BG
         COARSE = {cid: (TX.COARSE_NAMES[cid], list(members))
                   for cid, members in TX.COARSE_GROUPS.items()}
+        # A coarse class takes its group's main colour: door-any is drawn in the
+        # single-door rose, fixture-any in the sink green. canonical() already
+        # names each group's modal member. IGNORE has no members and no colour.
+        unresolved = []
+        for cid, members in sorted(TX.COARSE_GROUPS.items()):
+            if not members:
+                continue
+            CLASSES[cid] = (TX.COARSE_NAMES[cid], TX.ARCH_HEX[TX.canonical(cid)])
+            unresolved.append(cid)
+        # Appended here rather than in dataset/taxonomy.py, whose FAMILIES
+        # assertion requires exactly range(44) and would trip at import.
+        FAMILIES = FAMILIES + [("unresolved", unresolved)]
     else:
-        CLASSES = [(TX.CLASS_NAMES[i], US4_PALETTE[i]) for i in range(4)]
+        CLASSES = {i: (TX.CLASS_NAMES[i], US4_PALETTE[i]) for i in range(4)}
         FAMILIES = [("classes", [0, 1, 2]), ("background", [3])]
         BG = TX.BACKGROUND
         COARSE = {}
@@ -392,12 +411,13 @@ def tiles():
 
 INDEX = None
 INDEX_PATH = None
-INDEX_VERSION = 3
+INDEX_VERSION = 4
 
 
 def _index_key():
     """Cache key covering the schema version and the class vocabulary."""
-    blob = json.dumps([INDEX_VERSION, TAXONOMY, [c[0] for c in CLASSES]])
+    names = [CLASSES[k][0] for k in sorted(CLASSES)]
+    blob = json.dumps([INDEX_VERSION, TAXONOMY, names])
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
@@ -624,7 +644,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {
                 "width": d["width"], "height": d["height"],
                 "base": base,
-                "args": d["args"], "semanticIds": d["semanticIds"],
+                # Coordinates rounded to 3dp. As stored they carry full
+                # float repr ("493.5599999999997"), which is 4.6 MB of
+                # JSON on a 38k-primitive tile. At this tile's scale 3dp
+                # is 0.0004 of a pixel, so the rounding is invisible and
+                # it halves the payload -- which matters because the
+                # biggest tiles were failing to open at all.
+                "args": [[round(v, 3) for v in a] for a in d["args"]],
+                "semanticIds": d["semanticIds"],
+                # One int per primitive, next to args's eight floats.
+                # Needed to select a whole object rather than a segment.
+                "instanceIds": d.get("instanceIds", []),
                 "commands": d.get("commands", []),
                 "layerIds": d.get("layerIds", []),
                 "layerNames": d.get("layerNames", []),
@@ -976,7 +1006,7 @@ let TILES=[], cur=null, data=null, over={}, undo=[], paint=0, showbg=true;
 let layermap={}, projmap={}, layerScope="tile", onlyLayer=null, hoverLayer=null;
 let RECENT=[];
 try{ RECENT=(JSON.parse(localStorage.getItem("archcad.recent")||"[]")||[])
-        .filter(k=>k>=0&&k<CLASSES.length); }catch(e){}
+        .filter(k=>CLASSES[k]); }catch(e){}
 let al={dx:0,dy:0,sx:1,sy:1};
 let base={sx:1,sy:1}, auto=false;
 let verdict='', regions=[], rpaint='keep', drawing=null, selReg=-1;
@@ -1015,7 +1045,9 @@ async function loadList(project){
   showPending();
   $("list").innerHTML=TILES.map((t,i)=>`<div class=row data-i=${i}>
      <b>${t.name.replace("_s2.json","").slice(-34)}${t.edited?'<span class=e>edited</span>':''}${t.verdict?`<span class=v style="background:${t.verdict==="keep"?"#0d7a33":"#b0203a"};color:#fff">${t.verdict}</span>`:''}</b>
-     <s>${t.split} &middot; ${t.n} prims &middot; d${t.door} w${t.window} W${t.wall}</s></div>`).join("");
+     <s>${t.split} &middot; ${t.n} prims &middot; ${(t.top||[]).map(([k,v])=>
+        `<b style="color:${(CLASSES[k]||CLASSES[BG])[1]}">${(CLASSES[k]||["?"])[0].slice(0,9)}</b> ${v}`
+      ).join(" ")||"empty"}</s></div>`).join("");
 }
 
 async function open_(i){
@@ -1053,12 +1085,15 @@ function draw(){
   svg.replaceChildren(f); counts();
 }
 function counts(){
-  const c=new Array(CLASSES.length).fill(0);
-  data.args.forEach((_,i)=>{const k=cls(i); if(k<c.length) c[k]++;});
-  const rows=c.map((n,k)=>[k,n]).filter(([k,n])=>n>0&&k!==BG)
-               .sort((a,b)=>b[1]-a[1]);
+  // Keyed by id, not a dense array: coarse ids are 51+ and were counted
+  // nowhere, so a tile of nothing but doors reported an empty panel.
+  const c={};
+  data.args.forEach((_,i)=>{const k=cls(i); c[k]=(c[k]||0)+1;});
+  const rows=Object.entries(c).map(([k,n])=>[+k,n])
+               .filter(([k,n])=>n>0&&k!==BG).sort((a,b)=>b[1]-a[1]);
   $("counts").innerHTML=rows.map(([k,n])=>
-      `<div><span style="color:${CLASSES[k][1]}">&#9632;</span> ${CLASSES[k][0]} ${n}</div>`).join("")
+      `<div><span style="color:${(CLASSES[k]||CLASSES[BG])[1]}">&#9632;</span> `+
+      `${(CLASSES[k]||["?"+k])[0]} ${n}</div>`).join("")
     +`<div style="color:var(--muted)"><span>&#9632;</span> background ${c[BG]||0}</div>`
     +`<div style="margin-top:6px;color:var(--muted)">${Object.keys(over).length} corrected`
     +`${Object.keys(layermap).length?" &middot; "+Object.keys(layermap).length+" layer rules":""}</div>`;
@@ -1295,7 +1330,7 @@ function hit(e){
   undo.push({i,prev:(i in over)?over[i]:undefined});
   over[i]=paint;
   el.setAttribute("stroke",CLASSES[paint][1]); el.classList.add("sel");
-  if(paint===3&&!showbg) el.remove();
+  if(paint===BG&&!showbg) el.remove();
   counts();
 }
 
@@ -1332,7 +1367,7 @@ $("clsq").oninput=drawPalette;
 $("clsq").onkeydown=e=>{
   if(e.key==="Enter"){
     const q=$("clsq").value.trim().toLowerCase();
-    const m=CLASSES.map((c,k)=>k).filter(k=>CLASSES[k][0].toLowerCase().includes(q));
+    const m=Object.keys(CLASSES).map(Number).filter(k=>CLASSES[k][0].toLowerCase().includes(q));
     if(m.length===1){ pick(m[0]); $("clsq").value=""; drawPalette(); }
   }
   if(e.key==="Escape"){ $("clsq").value=""; drawPalette(); $("clsq").blur(); }
@@ -1508,7 +1543,7 @@ def main():
 
     tax = detect_taxonomy(ROOT) if a.taxonomy == "auto" else a.taxonomy
     set_taxonomy(tax)
-    print(f"taxonomy: {tax} ({len(CLASSES)} classes incl. background)")
+    print(f"taxonomy: {tax} ({len(CLASSES)} classes incl. background and coarse)")
 
     # Drawing titles from dataset/classify_viewports.py, if it has been run.
     # Shown as a badge and a filter rather than acted on: its "plan" bucket is
