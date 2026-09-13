@@ -170,7 +170,7 @@ class SVGDataset(Dataset):
     def __init__(self, data_root, split, data_norm, aug, img_size=980,
                  repeat=1, split_path=None, num_classes=NUM_CLASSES, logger=None,
                  use_corrections=True, coarse_policy="bg", source=None, annotated=None,
-                 stuff_classes=None, index_base=0, max_samples=0):
+                 stuff_classes=None, index_base=0, max_samples=0, file_list=None):
         self.data_root = data_root
         self.split = split
         self.data_norm = data_norm
@@ -189,6 +189,18 @@ class SVGDataset(Dataset):
         self.data_list = sorted(glob(osp.join(data_root, split, "*_s2.json")))
         if not self.data_list:  # tolerate a flat directory with no split subdir
             self.data_list = sorted(glob(osp.join(data_root, "*_s2.json")))
+
+        # Restrict to the basenames in a text file (tools/select_tiles.py).
+        # "{split}" in the path is replaced, so one config serves train and test.
+        if file_list:
+            path = str(file_list).replace("{split}", str(split))
+            with open(path) as f:
+                wanted = {ln.strip() for ln in f if ln.strip()}
+            before = len(self.data_list)
+            self.data_list = [p for p in self.data_list if osp.basename(p) in wanted]
+            if logger is not None:
+                logger.info(f"  {source or data_root}: {len(self.data_list)} of {before} "
+                            f"drawings listed in {path}")
 
         if logger is not None:
             logger.info(f"Load {split} dataset: {len(self.data_list)} svg")
