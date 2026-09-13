@@ -178,7 +178,8 @@ def _atomic_save(obj, path):
 
     # Force the bytes to disk before the rename, so a crash cannot leave a
     # renamed-but-empty file behind.
-    with open(tmp, "rb") as f:
+    # Writable handle: Windows refuses fsync on a read-only one (EBADF).
+    with open(tmp, "r+b") as f:
         os.fsync(f.fileno())
 
     if os.path.exists(path):
@@ -210,7 +211,11 @@ def checkpoint_save(epoch, model, optimizer, work_dir, save_freq=16, best=False,
     # `rolling` writes only latest.pth — used for frequent mid-epoch saves so an
     # unexpected shutdown costs minutes instead of a whole epoch.
     if not rolling:
-        torch.save(checkpoint, os.path.join(work_dir, f"epoch_{epoch}.pth"))
+        # Weights only (~0.4 GB instead of ~1.2 GB with AdamW state): the kept
+        # epoch files are for evaluation and rollback; resuming uses latest.pth.
+        # A 50-epoch run kept ~16 GB of these before.
+        torch.save({k: v for k, v in checkpoint.items() if k != "optimizer"},
+                   os.path.join(work_dir, f"epoch_{epoch}.pth"))
 
     _atomic_save(checkpoint, os.path.join(work_dir, "latest.pth"))
 
@@ -225,7 +230,14 @@ def checkpoint_save(epoch, model, optimizer, work_dir, save_freq=16, best=False,
             os.remove(f)
 
 
-def load_checkpoint(checkpoint, logger, model, optimizer=None, strict=False):
+# Buffers that are configuration, not learned state. The criterion's
+# `empty_weight` holds the run's class weights; restoring it from a checkpoint
+# silently replaced the weights the current config asked for.
+CONFIG_STATE_PREFIXES = ("criterion.",)
+
+
+def load_checkpoint(checkpoint, logger, model, optimizer=None, strict=False,
+                    skip_prefixes=CONFIG_STATE_PREFIXES):
     if hasattr(model, "module"):
         model = model.module
     # Load onto CPU first, then let the caller move the model; this keeps
@@ -233,6 +245,8 @@ def load_checkpoint(checkpoint, logger, model, optimizer=None, strict=False):
     state_dict = torch.load(checkpoint, map_location="cpu", weights_only=False)
     src_state_dict = state_dict["net"]
     target_state_dict = model.state_dict()
+    for k in [k for k in src_state_dict if k.startswith(tuple(skip_prefixes))]:
+        del src_state_dict[k]
     skip_keys = []
     # skip mismatch size tensors in case of pretraining
     for k in src_state_dict.keys():
@@ -244,7 +258,9 @@ def load_checkpoint(checkpoint, logger, model, optimizer=None, strict=False):
         del src_state_dict[k]
     missing_keys, unexpected_keys = model.load_state_dict(src_state_dict, strict=strict)
     if skip_keys:
-        logger.info(f'removed keys in source state_dict due to size mismatch: {", ".join(skip_keys)}')
+        # A warning, not info: a head that fails to transfer is easy to miss.
+        logger.warning(f'removed keys in source state_dict due to size mismatch: {", ".join(skip_keys)}')
+    missing_keys = [k for k in missing_keys if not k.startswith(tuple(skip_prefixes))]
     if missing_keys:
         logger.info(f'missing keys in source state_dict: {", ".join(missing_keys)}')
     if unexpected_keys:
@@ -252,7 +268,9 @@ def load_checkpoint(checkpoint, logger, model, optimizer=None, strict=False):
 
     # load optimizer
     if optimizer is not None:
-        assert "optimizer" in state_dict
+        assert "optimizer" in state_dict, (
+            f"{checkpoint} holds weights only; resume from latest.pth, or load it as "
+            "`pretrain` to start a new schedule from these weights")
         optimizer.load_state_dict(state_dict["optimizer"])
 
     if "epoch" in state_dict:
@@ -277,20 +295,25 @@ def get_max_memory():
     return mem_mb.item()
 
 
+def _to_device(x, device):
+    # Recurse into lists and tuples: the collate function hands images and their
+    # centres over as lists of tensors. Moving only bare tensors left those on the
+    # CPU, ImgEmbed raised a device mismatch on every batch, and the training loop
+    # caught it and skipped the batch -- GPU training ran for whole epochs
+    # without a single backward pass.
+    if isinstance(x, torch.Tensor):
+        return x.to(device)
+    if isinstance(x, (list, tuple)) and any(isinstance(v, (torch.Tensor, list, tuple)) for v in x):
+        return type(x)(_to_device(v, device) for v in x)
+    return x
+
+
 def cuda_cast(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        new_args = []
         device = get_device()
-        for x in args:
-            if isinstance(x, torch.Tensor):
-                x = x.to(device)
-            new_args.append(x)
-        new_kwargs = {}
-        for k, v in kwargs.items():
-            if isinstance(v, torch.Tensor):
-                v = v.to(device)
-            new_kwargs[k] = v
+        new_args = [_to_device(x, device) for x in args]
+        new_kwargs = {k: _to_device(v, device) for k, v in kwargs.items()}
         return func(*new_args, **new_kwargs)
 
     return wrapper

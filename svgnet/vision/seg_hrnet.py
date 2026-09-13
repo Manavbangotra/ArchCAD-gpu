@@ -261,7 +261,7 @@ class HighResolutionNet(nn.Module):
 
     def __init__(self, config, **kwargs):
         
-        with open(config.vision.yaml, "r") as f:
+        with open(config.vision.yaml, "r", encoding="utf-8") as f:
             bacobone = yaml.safe_load(f)
         extra = bacobone["MODEL"]["EXTRA"]
 

@@ -104,7 +104,7 @@ def main():
     lg.info = lambda *a, **k: None
     lg.warning = lambda *a, **k: None
 
-    cfg = Munch.fromDict(yaml.safe_load(open(cfg_path).read()))
+    cfg = Munch.fromDict(yaml.safe_load(open(cfg_path, encoding="utf-8").read()))
     global BG_ID, STUFF_IDS
     BG_ID = set_taxonomy(cfg.model.semantic_classes)
     from svgnet.data.svg import get_categories

@@ -12,7 +12,7 @@ import os.path as osp
 import time
 from functools import partial
 from svgnet.data import build_dataloader, build_dataset
-from svgnet.evaluation import PointWiseEval,InstanceEval
+from svgnet.evaluation import PointWiseEval,InstanceEval,SourceEvals,batch_source
 from svgnet.model.svgnet import SVGNet as svgnet
 from svgnet.util  import get_root_logger, init_dist, load_checkpoint, get_device, get_dist_info
 
@@ -64,7 +64,7 @@ def save_gt_instances(root, name, scan_ids, gt_insts):
 
 def main():
     args = get_args()
-    cfg_txt = open(args.config, "r").read()
+    cfg_txt = open(args.config, "r", encoding="utf-8").read()
     cfg = Munch.fromDict(yaml.safe_load(cfg_txt))
     if args.dist:
         init_dist()
@@ -93,12 +93,7 @@ def main():
     # ignore_label follows the background id, which is the class count. It was
     # hardcoded to 32, so on any taxonomy other than a 32-class one the
     # background was scored as if it were a real class.
-    sem_point_eval = PointWiseEval(num_classes=cfg.model.semantic_classes,
-                                   ignore_label=cfg.model.semantic_classes,
-                                   gpu_num=gpu_num)
-    instance_eval = InstanceEval(num_classes=cfg.model.semantic_classes,
-                                 ignore_label=cfg.model.semantic_classes,
-                                 gpu_num=gpu_num)
+    evals = SourceEvals(cfg.model.semantic_classes, gpu_num=gpu_num)
     
     with torch.no_grad():
         model.eval()
@@ -115,15 +110,7 @@ def main():
             
             t2 = time.time()
             time_arr.append(t2 - t1)
-            sem_preds = torch.argmax(res["semantic_scores"],dim=1).cpu().numpy()
-            sem_gts = res["semantic_labels"].cpu().numpy()
-            sem_point_eval.update(sem_preds, sem_gts)
-            #sem_point_eval.update(sem_preds, sem_gts, lengths) #    def update(self, pred_sem, gt_sem):
-            instance_eval.update(
-                res["instances"],
-                res["targets"],
-                res["lengths"],
-            )
+            evals.update(batch_source(batch), res)
            
     # logger.info("Evaluate semantic segmentation")
     # sem_point_eval.get_eval(logger)
@@ -140,13 +127,9 @@ def main():
     # #logger.info("Save results")
         # 保存结果
 
-    logger.info("Evaluate semantic segmentation")
-    sem_point_eval.get_eval(logger)
-    # sem_point_eval.get_semantic_eval(logger) #AttributeError: 'PointWiseEval' object has no attribute 'get_semantic_eval'
-
-    logger.info("Evaluate panoptic segmentation")
-    instance_eval.get_eval(logger)
-    # instance_eval.get_instance_eval(logger)
+    # Per source for multi-source test sets; identical to the old pooled report
+    # for a single dataset.
+    evals.report(logger)
 
     
 if __name__ == "__main__":

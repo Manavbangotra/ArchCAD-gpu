@@ -17,7 +17,7 @@ from svgnet.data import build_dataloader, build_dataset
 from svgnet.model.svgnet import SVGNet as svgnet
 from svgnet.model.criterion import SetCriterion
 from svgnet.model.matcher import HungarianMatcher
-from svgnet.evaluation import PointWiseEval,InstanceEval
+from svgnet.evaluation import PointWiseEval,InstanceEval,SourceEvals,batch_source
 from svgnet.util import (
     get_device,
     AverageMeter,
@@ -72,10 +72,16 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
 
     if train_loader.sampler is not None and cfg.dist:
         train_loader.sampler.set_epoch(epoch)
+    if hasattr(train_loader.batch_sampler, "set_epoch"):
+        train_loader.batch_sampler.set_epoch(epoch)   # multi-source: reproducible per epoch
 
     accum = max(1, int(getattr(cfg, "accumulate_steps", 1)))
     save_interval_iters = int(getattr(cfg, "save_interval_iters", 0) or 0)
     optimizer.zero_grad(set_to_none=True)
+    pending = 0          # micro-batches back-propagated since the last step
+    # A handful of bad drawings is tolerable; a systematic fault is not. Before
+    # this check a device mismatch skipped every batch and training "ran".
+    max_skip_frac = float(getattr(cfg, "max_skip_frac", 0.01))
 
     for i, batch in enumerate(train_loader, start=1):
         data_time.update(time.time() - end)
@@ -96,6 +102,10 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
                 if skipped["n"] <= 5 or skipped["n"] % 100 == 0:
                     logger.warning(f"batch {i} skipped ({type(e).__name__}: {e}) "
                                    f"file={batch[-1]} -- {skipped['n']} so far this epoch")
+                if i >= 20 and skipped["n"] > max(3, max_skip_frac * i):
+                    raise RuntimeError(
+                        f"{skipped['n']} of the first {i} batches failed (limit "
+                        f"{max_skip_frac:.0%}); last error: {type(e).__name__}: {e}") from e
                 continue
 
             if torch.distributed.is_initialized():
@@ -117,11 +127,13 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
         if loss > 0:
             # Scale so accumulated gradients average rather than sum.
             scaler.scale(loss / accum).backward()
+            pending += 1
 
-            if i % accum == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
+        if i % accum == 0 and pending:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            pending = 0
 
         if i == 1 and epoch == 1:
             # Report parameters that never receive a gradient — useful once,
@@ -160,7 +172,8 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
                 log_str += f", {k}: {v.val:.4f}"
             logger.info(log_str)
     # Flush a partial accumulation window left over at the end of the epoch.
-    if len(train_loader) % accum != 0:
+    # GradScaler asserts if step() runs with no backward since the last update.
+    if pending:
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
@@ -184,12 +197,7 @@ def validate(epoch, model, optimizer, val_loader, cfg, logger, writer):
     # ignore_label follows the background id, matching tools/inference.py
     # (the previous hardcoded 49 never matched, so background was scored).
     _, world_size = get_dist_info()
-    sem_point_eval = PointWiseEval(num_classes=cfg.model.semantic_classes,
-                                   ignore_label=cfg.model.semantic_classes,
-                                   gpu_num=world_size)
-    instance_eval = InstanceEval(num_classes=cfg.model.semantic_classes,
-                                 ignore_label=cfg.model.semantic_classes,
-                                 gpu_num=world_size)
+    evals = SourceEvals(cfg.model.semantic_classes, gpu_num=world_size)
     meter_dict = {}
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -200,14 +208,7 @@ def validate(epoch, model, optimizer, val_loader, cfg, logger, writer):
             try:
                 with torch.cuda.amp.autocast(enabled=cfg.fp16):
                     res,loss, log_vars = model(batch)
-                sem_preds = torch.argmax(res["semantic_scores"],dim=1).cpu().numpy()
-                sem_gts = res["semantic_labels"].cpu().numpy()
-                sem_point_eval.update(sem_preds, sem_gts)
-                instance_eval.update(
-                    res["instances"],
-                    res["targets"],
-                    res["lengths"],
-                )
+                evals.update(batch_source(batch), res)
                 # meter_dict
                 for k, v in log_vars.items():
                     if k not in meter_dict.keys() and k != "placeholder":
@@ -223,26 +224,23 @@ def validate(epoch, model, optimizer, val_loader, cfg, logger, writer):
 
     if val_skipped["n"]:
         logger.warning(f"validation: {val_skipped['n']} of {len(val_loader)} batches skipped")
-    logger.info("Evaluate semantic segmentation")
-    miou,acc = sem_point_eval.get_eval(logger)
-    logger.info("Evaluate panoptic segmentation")
-    sPQ, sRQ, sSQ = instance_eval.get_eval(logger)
+    which = str(getattr(cfg, "early_stop", {}).get("metric", "miou")).lower()
+    # Per source, so joint training cannot trade one dataset away unnoticed;
+    # "best" is the macro mean over sources (the plain score with one source).
+    score, per_source = evals.report(logger, metric=which)
     for k, v in meter_dict.items():
         writer.add_scalar(f"val/{k}", v.avg, epoch)
-        
-    writer.add_scalar("val/mIoU", miou, epoch)
-    writer.add_scalar("val/Acc", acc, epoch)
-    writer.add_scalar("val/sPQ", sPQ, epoch)
-    writer.add_scalar("val/sRQ", sRQ, epoch)
-    writer.add_scalar("val/sSQ", sSQ, epoch)
+    for name, m in per_source.items():
+        tag = "val" if name == "all" else f"val_{name}"
+        writer.add_scalar(f"{tag}/mIoU", m["miou"], epoch)
+        writer.add_scalar(f"{tag}/sPQ", m["pq"], epoch)
+        writer.add_scalar(f"{tag}/bg_fp", m["bg_fp"], epoch)
 
 
     # Which number decides "best" and when to stop early. sPQ was hardcoded, but
     # panoptic quality can sit at exactly 0 for many epochs on an imbalanced
     # dataset, and `best_metric < sPQ` is then never true — so best.pth was never
     # written at all. mIoU moves from the first epoch, so it is the default.
-    which = str(getattr(cfg, "early_stop", {}).get("metric", "miou")).lower()
-    score = sPQ if which == "pq" else miou
 
     if score > best_metric:
         best_metric = score
@@ -258,7 +256,7 @@ def validate(epoch, model, optimizer, val_loader, cfg, logger, writer):
 def main():
     args = get_args()
 
-    cfg_txt = open(args.config, "r").read()
+    cfg_txt = open(args.config, "r", encoding="utf-8").read()
     cfg = Munch.fromDict(yaml.safe_load(cfg_txt))
 
     # Seed unconditionally. This used to sit inside the `if args.dist` branch, so

@@ -34,7 +34,7 @@ def process_svgnet(config_path: str, checkpoint_path: str, datadir: str, out: st
         out (str): 输出结果保存路径
     """
     # 读取配置文件
-    cfg_txt = open(config_path, "r").read()
+    cfg_txt = open(config_path, "r", encoding="utf-8").read()
     cfg = Munch.fromDict(yaml.safe_load(cfg_txt))
     logger = get_root_logger()
 

@@ -105,11 +105,14 @@ def furthestsampling(xyz, offset, new_offset):
         # Standard greedy FPS, seeded at index 0 like the CUDA kernel.
         sel = torch.zeros(m, dtype=torch.long, device=xyz.device)
         best = torch.full((n,), float("inf"), device=xyz.device)
-        last = 0
+        # `last` stays a device tensor: `.item()` here forced a GPU sync on every
+        # one of the m iterations, which dominated FPS time on CUDA. The
+        # selection is identical.
+        last = torch.zeros((), dtype=torch.long, device=xyz.device)
         for i in range(1, m):
             d = torch.sum((pts - pts[last]) ** 2, dim=1)
             best = torch.minimum(best, d)
-            last = int(torch.argmax(best).item())
+            last = torch.argmax(best)
             sel[i] = last
         out.append(sel + s_src)
 
