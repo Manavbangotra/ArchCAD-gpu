@@ -221,3 +221,6 @@ dataset/us_plans/*/.editor_index.json
 
 # FloorPlanCAD download archives and extraction
 dataset/FloorplanCAD/
+
+# Training runs: checkpoints are 0.4-1.2 GB each
+work_dirs/
