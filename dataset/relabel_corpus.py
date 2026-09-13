@@ -35,7 +35,7 @@ import taxonomy as TX  # noqa: E402
 from parse_pdf_plans import TAXONOMIES, cluster_instances  # noqa: E402
 
 
-def relabel(path, mapper, bg_id, cluster_tol_frac=0.004):
+def relabel(path, mapper, bg_id, cluster_tol_frac=0.004, reinstance=False):
     """Returns (changed, before_counter, after_counter) for one tile."""
     with open(path) as fh:
         d = json.load(fh)
@@ -48,7 +48,7 @@ def relabel(path, mapper, bg_id, cluster_tol_frac=0.004):
     new = [lut[li] if li < len(lut) else bg_id for li in lids]
     if len(new) != len(old):
         return None                      # malformed; leave it alone
-    if new == old:
+    if new == old and not reinstance:
         return (False, Counter(old), Counter(new))
 
     # Re-cluster: instances are per class, so a class change invalidates them.
@@ -76,6 +76,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would change and write nothing")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--reinstance", action="store_true",
+                    help="re-cluster instances even where the labels are "
+                         "unchanged, e.g. after changing which classes get "
+                         "grouped into objects at all")
     a = ap.parse_args()
 
     root = a.root
@@ -127,7 +131,7 @@ def main():
                     continue
                 res = (new != old, Counter(old), Counter(new))
             else:
-                res = relabel(p, mapper, bg_id)
+                res = relabel(p, mapper, bg_id, reinstance=a.reinstance)
                 if res is None:
                     skipped += 1
                     continue

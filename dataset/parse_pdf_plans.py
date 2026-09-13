@@ -309,7 +309,12 @@ def cluster_instances(prims, sem, tol, bg_id=BACKGROUND):
     # Bucket endpoints by class so only same-class primitives can merge.
     buckets = {}
     for i, p in enumerate(prims):
-        if sem[i] >= bg_id:          # background, and any coarse band-C id
+        # Only true background is skipped. A coarse id (door-any,
+        # furniture-any) is still an object -- we know its geometry forms
+        # one, we just do not know which class -- and it needs an instance
+        # id so a person can click the whole thing and label it. Skipping
+        # them left 50k fixture primitives with no object to select.
+        if sem[i] == bg_id:
             continue
         for (x, y) in ((p["pts"][0], p["pts"][1]), (p["pts"][6], p["pts"][7])):
             key = (sem[i], int(x // tol), int(y // tol))
@@ -328,7 +333,12 @@ def cluster_instances(prims, sem, tol, bg_id=BACKGROUND):
 
     remap, nxt = {}, 0
     for i in range(n):
-        if sem[i] >= bg_id:          # background, and any coarse band-C id
+        # Only true background is skipped. A coarse id (door-any,
+        # furniture-any) is still an object -- we know its geometry forms
+        # one, we just do not know which class -- and it needs an instance
+        # id so a person can click the whole thing and label it. Skipping
+        # them left 50k fixture primitives with no object to select.
+        if sem[i] == bg_id:
             continue
         r = find(i)
         if r not in remap:
