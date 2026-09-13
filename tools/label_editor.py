@@ -172,6 +172,37 @@ def _relink(split, name, verdict):
             os.symlink(target, here)
 
 
+_SIDE_CACHE = {"key": None, "names": frozenset()}
+
+
+def _sidecar_names():
+    """Basenames of every sidecar under all/, cached on the directory mtime.
+
+    The tile list used to stat two paths per row looking for a verdict, which is
+    32k filesystem calls for a 16k-tile corpus -- and on a corpus with no
+    verdicts at all, 32k calls to learn nothing. Under disk contention that
+    pushed the request past twenty seconds and the connection was reset, which
+    looks exactly like the server hanging. One listdir answers all of them.
+    """
+    d = osp.join(ROOT, "all") if osp.isdir(osp.join(ROOT, "all")) else ROOT
+    try:
+        key = (d, os.stat(d).st_mtime_ns)
+    except OSError:
+        return frozenset()
+    if _SIDE_CACHE["key"] != key:
+        try:
+            _SIDE_CACHE["names"] = frozenset(
+                f for f in os.listdir(d) if f.endswith(".json") and "_s2." in f)
+        except OSError:
+            _SIDE_CACHE["names"] = frozenset()
+        _SIDE_CACHE["key"] = key
+    return _SIDE_CACHE["names"]
+
+
+def _has_side(name, kind):
+    return name.replace("_s2.json", f"_s2.{kind}.json") in _sidecar_names()
+
+
 def _read_side(tile_path, kind, default=None):
     try:
         return json.load(open(_side(tile_path, kind)))
@@ -494,6 +525,18 @@ class Handler(BaseHTTPRequestHandler):
             proj = q.get("project", [None])[0]
             if proj:
                 rows = [r for r in rows if r["project"] == proj]
+            # Most tiles on a construction sheet carry no labelled geometry at
+            # all -- they are title blocks, general notes, elevations, details,
+            # schedules. Measured on json5: 68% of tiles are 0% labelled. Left
+            # unfiltered the list is almost entirely noise, so default to
+            # showing only tiles with something on them, richest first.
+            content = q.get("content", ["labelled"])[0]
+            if content == "labelled":
+                rows = [r for r in rows if sum(v for _, v in r.get("top", []))]
+            elif content == "empty":
+                rows = [r for r in rows if not sum(v for _, v in r.get("top", []))]
+            if q.get("sort", ["content"])[0] == "content":
+                rows = sorted(rows, key=lambda r: -sum(v for _, v in r.get("top", [])))
             kind = q.get("kind", [None])[0]
             if kind:
                 # Read from VIEWPORTS at request time, not from the index: the
@@ -502,18 +545,36 @@ class Handler(BaseHTTPRequestHandler):
                 rows = [r for r in rows
                         if ((VIEWPORTS.get(r["name"]) or {}).get("kind")
                             or "unlabelled") == kind]
-            # Read verdicts at request time rather than caching them into the
-            # index: the index is keyed on tile count, so a verdict changed
-            # after it was built would never show up.
+            # Cap before enriching, not after. A corpus keeps growing and the
+            # tile list is the one response whose size tracks it; doing the
+            # per-row work for 16k tiles and then returning 4k is both wasted
+            # and slow enough that this machine's TLS-inspecting antivirus
+            # resets the connection, which looks exactly like the server
+            # hanging. The filters above are what make a large corpus navigable
+            # anyway -- an unpaged list of 16k tiles is not a workflow.
+            projects = sorted({r["project"] for r in rows})
+            total = len(rows)
+            try:
+                limit = max(1, min(20000, int(q.get("limit", ["4000"])[0])))
+            except ValueError:
+                limit = 4000
+            rows = rows[:limit]
+
+            # Verdicts are read at request time rather than cached into the
+            # index: the index is cache-keyed, so a verdict changed after it was
+            # built would never show up.
             out = []
             for r in rows:
-                v = _read_side(osp.join(ROOT, r["split"], r["name"]), "verdict")
+                # Only open the sidecar when one exists; see _sidecar_names.
+                v = (_read_side(osp.join(ROOT, r["split"], r["name"]), "verdict")
+                     if _has_side(r["name"], "verdict") else None)
                 vp = VIEWPORTS.get(r["name"]) or {}
                 out.append(dict(r, verdict=(v or {}).get("verdict", ""),
                                 kind=vp.get("kind", "unlabelled"),
                                 title=vp.get("title", "")[:60]))
             return self._send(200, {"tiles": out, "view": VIEW,
-                                    "projects": sorted({r["project"] for r in rows})})
+                                    "total": total, "shown": len(out),
+                                    "projects": projects})
 
         if u.path == "/api/tile":
             split, name = q["split"][0], unquote(q["name"][0])
@@ -772,6 +833,17 @@ main{position:relative;overflow:hidden;background:var(--bg)}
 <aside>
   <h2>Project</h2>
   <div style="padding:0 12px"><select id=proj style="width:100%"></select></div>
+  <div style="padding:6px 12px 0;display:flex;gap:6px">
+    <select id=content style="flex:1">
+      <option value="labelled">has labels</option>
+      <option value="empty">no labels</option>
+      <option value="all">all tiles</option>
+    </select>
+    <select id=sort style="flex:1">
+      <option value="content">most labelled</option>
+      <option value="name">by name</option>
+    </select>
+  </div>
   <h2>Tiles</h2>
   <div id=list></div>
 </aside>
@@ -900,8 +972,14 @@ function cls(i){
 }
 
 async function loadList(project){
-  const r=await fetch("/api/tiles"+(project?`?project=${project}`:""));
+  const qs=new URLSearchParams();
+  if(project) qs.set("project",project);
+  qs.set("content", ($("content")||{}).value || "labelled");
+  qs.set("sort", ($("sort")||{}).value || "content");
+  const r=await fetch("/api/tiles?"+qs.toString());
   const j=await r.json(); TILES=j.tiles; VIEW=j.view||"";
+  if(j.total && j.shown < j.total)
+    toast(`showing ${j.shown} of ${j.total} — narrow by project to see more`);
   if(!$("proj").options.length){
     $("proj").innerHTML='<option value="">all projects</option>'+
       j.projects.map(p=>`<option>${p}</option>`).join("");
@@ -1292,6 +1370,8 @@ document.querySelector(".modes").onclick=e=>{const b=e.target.closest(".mode"); 
 $("showbg").onchange=e=>{showbg=e.target.checked; draw();};
 $("list").onclick=e=>{const r=e.target.closest(".row"); if(r) open_(+r.dataset.i);};
 $("proj").onchange=e=>loadList(e.target.value);
+$("content").onchange = () => loadList($("proj").value);
+$("sort").onchange    = () => loadList($("proj").value);
 
 async function save(){
   if(!cur) return;
