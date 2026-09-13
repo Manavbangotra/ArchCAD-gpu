@@ -185,10 +185,43 @@ class Decoder(nn.Module):
                 pos_encodings_pcd.append(tmp.permute(2,0,1))
         return pos_encodings_pcd
     
+    def _query_for_dn_batched(self, coords, tgt_labels, tgt_masks, queries, query_pos):
+        dn_args = torch.nonzero(tgt_labels < self.num_classes).flatten()
+        if dn_args.numel() == 0:
+            return queries, query_pos, None, None
+        m = tgt_masks[dn_args].bool()                              # [D, N]
+        xy = coords[:, :2].unsqueeze(0)                            # [1, N, 2]
+        inf = torch.tensor(float("inf"), device=coords.device, dtype=coords.dtype)
+        lo = torch.where(m.unsqueeze(-1), xy, inf).amin(1)         # [D, 2]
+        hi = torch.where(m.unsqueeze(-1), xy, -inf).amax(1)
+        r = torch.rand(lo.shape, device=coords.device, dtype=coords.dtype)
+        pts = torch.cat([lo + (hi - lo) * r, torch.zeros_like(lo[:, :1])], 1)
+        with autocast(enabled=False):
+            pos = self.pos_enc(pts[None].float(), input_range=[pts.min(0)[0][None], pts.max(0)[0][None]])
+        dn_query_pos = pos.permute(2, 0, 1)                        # [D, 1, C]
+        dn_query_feat = self.label_enc(tgt_labels[dn_args])[:, None, :]
+
+        pad_size = len(dn_query_feat)
+        tgt_size = pad_size + self.num_queries
+        tgt_mask = torch.ones(tgt_size, tgt_size, device=coords.device) < 0
+        tgt_mask[pad_size:, :pad_size] = True
+        queries = torch.cat([dn_query_feat, queries], dim=0)
+        query_pos = torch.cat([dn_query_pos, query_pos], dim=0)
+        return queries, query_pos, tgt_mask, dn_args
+
     def query_for_dn2(self, stage_list, queries, query_pos):
         coords = stage_list['up'][0]['p_out']
         tgt_labels = stage_list['tgt'][0]["labels"]
         tgt_masks = stage_list['tgt'][0]["masks"].transpose(0,1)
+
+        # Vectorised over targets. The per-target loop below did a boolean
+        # gather, two reductions, three host syncs and a positional encoding
+        # for every object -- hundreds of syncs per step on a US tile. The
+        # encoding is not normalised (normalize_pos_enc: False), so encoding
+        # all points in one call gives each point the same vector as encoding
+        # it alone. Only the order in which random numbers are drawn differs.
+        if not getattr(self, "_dn_loop", False) and not self.pos_enc.normalize:
+            return self._query_for_dn_batched(coords, tgt_labels, tgt_masks, queries, query_pos)
 
         query_feats, query_poses = [], []
         dn_args = []

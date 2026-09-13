@@ -40,7 +40,7 @@ class SVGNet(nn.Module):
         self.register_buffer("target_rows", target_rows(self.num_classes), persistent=False)
         
     def train(self, mode=True):
-        super().train(mode)
+        return super().train(mode)   # nn.Module returns self; .eval() chains
         
     def forward(self, batch,return_loss=True):
         # 9 fields from hand-built batches (tools/inference.py); 10 when the

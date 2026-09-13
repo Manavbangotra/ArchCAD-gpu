@@ -18,6 +18,7 @@ These are semantically equivalent to the CUDA kernels but considerably slower;
 they are intended for CPU inference, debugging and small-scale runs.
 """
 
+import numpy as np
 import torch
 
 
@@ -102,23 +103,35 @@ def furthestsampling(xyz, offset, new_offset):
             out.append(sel + s_src)
             continue
 
-        # Standard greedy FPS, seeded at index 0 like the CUDA kernel.
-        sel = torch.zeros(m, dtype=torch.long, device=xyz.device)
-        best = torch.full((n,), float("inf"), device=xyz.device)
-        # `last` stays a device tensor: `.item()` here forced a GPU sync on every
-        # one of the m iterations, which dominated FPS time on CUDA. The
-        # selection is identical.
-        last = torch.zeros((), dtype=torch.long, device=xyz.device)
-        for i in range(1, m):
-            d = torch.sum((pts - pts[last]) ** 2, dim=1)
-            best = torch.minimum(best, d)
-            last = torch.argmax(best)
-            sel[i] = last
+        sel = torch.from_numpy(_fps_numpy(pts.detach().cpu().numpy(), m)).to(xyz.device)
         out.append(sel + s_src)
 
     if not out:
         return torch.zeros(0, dtype=torch.int32, device=xyz.device)
     return torch.cat(out).int()
+
+
+def _fps_numpy(pts, m):
+    """Greedy farthest point sampling, seeded at index 0 like the CUDA kernel.
+
+    Deliberately on the CPU. Greedy FPS is m sequential steps; on the GPU each
+    step is ~5 kernel launches, and a 6,000-primitive tile needs ~1,500 steps
+    per downsampling stage -- thousands of launches whose overhead dwarfs the
+    arithmetic. The same loop over a NumPy float32 array is one small
+    vectorised op per step. Selection matches the torch loop (first index on
+    ties, as both argmax implementations pick).
+    """
+    pts = np.ascontiguousarray(pts, dtype=np.float32)
+    n = pts.shape[0]
+    sel = np.zeros(m, dtype=np.int64)
+    best = np.full(n, np.inf, dtype=np.float32)
+    last = 0
+    for i in range(1, m):
+        d = pts - pts[last]
+        np.minimum(best, np.einsum("ij,ij->i", d, d), out=best)
+        last = int(best.argmax())
+        sel[i] = last
+    return sel
 
 
 def sectorized_fps(xyz, offset, new_offset, num_sector=1):

@@ -28,6 +28,7 @@ CHECKS = [
     ("loader/editor/weights agree", "dataset/test_merge_agreement.py", True),
     ("set loss over target rows", "tools/test_set_loss.py", True),
     ("multi-source batches", "tools/test_multi_source.py", True),
+    ("fast paths match loops", "tools/test_fast_paths.py", True),
 ]
 
 
