@@ -371,6 +371,13 @@ _ARCH_LAYER_RULES = [
     # block.
     (re.compile(r"^(?!.*(?:LITE|LIGHT|ELEC|LUMIN|LAMP|^E[\s_-]))(?=.*FIXT)",
                 re.I), FIXTURE_ANY),
+    # "A-PLMB" on an architectural sheet is the sanitary fixtures drawn for
+    # coordination -- the toilets, basins and tubs in a unit plan -- not the
+    # pipework, which lives on the P- discipline layers and is excluded here.
+    # Missing this cost 9,017 primitives across the corpus.
+    (re.compile(r"^(?!.*(?:PIPE|VENT|WASTE|STORM|DRAIN|RISER|SUPPLY))"
+                r"(?=.*(?:PLMB|PLUMB))", re.I), FIXTURE_ANY),
+    (re.compile(r"SHOWER|SHWR", re.I), FIXTURE_ANY),
 
     # -- casework/millwork. FloorPlanCAD calls this "cabinet". ----------------
     (re.compile(r"CASEWORK|Q[\s_-]*CASE|CSWK|MILLWORK|MILL[\s_-]*WK"
@@ -422,11 +429,26 @@ assert all(c == ARCH_BG or c in ARCH_NAMES or c in COARSE_GROUPS
            for _, c in _ARCH_LAYER_RULES), "a layer rule targets an unknown class"
 
 
+# AutoCAD writes an XREF-bound layer two ways, and both appear in this corpus:
+#   "XREF - 1st Floor|A-DOOR"        pipe separator
+#   "1 BR-A$0$A-PLMB"                dollar separator, used by unit-plan blocks
+# Only the pipe form was handled, so every apartment unit plan's plumbing came
+# through as the whole string and matched nothing -- 9,017 primitives of
+# bathroom fixtures labelled background, on exactly the unit plans this corpus
+# is mostly made of.
+_XREF = re.compile(r"^.*(?:\||\$\d+\$)")
+
+
+def strip_xref(layer_name):
+    """The layer's own name, with any XREF binding prefix removed."""
+    return _XREF.sub("", layer_name)
+
+
 def from_arch_layer(layer_name):
     """AIA-style CAD layer name -> Arch-43 index (or a band-C coarse id)."""
     if not layer_name:
         return ARCH_BG
-    name = layer_name.split("|")[-1]  # drop XREF prefix: "XREF - 1st Floor|A-DOOR"
+    name = strip_xref(layer_name)
     for pattern, cls in _ARCH_LAYER_RULES:
         if pattern.search(name):
             return cls

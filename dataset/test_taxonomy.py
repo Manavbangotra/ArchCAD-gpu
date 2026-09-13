@@ -129,6 +129,23 @@ def test_layers():
         ("Q-SPCQ", "equipment"),
         ("A-ELEVATOR", "elevator"),
 
+        # -- XREF-bound unit-plan layers. AutoCAD uses two separators and only
+        #    the pipe form was handled, so every apartment unit plan's bathroom
+        #    came through as the whole string and matched nothing -------------
+        ("XREF - 1st Floor|A-DOOR", "door-any"),
+        ("1 BR-A$0$A-PLMB", "fixture-any"),
+        ("2 BR-F_Basement-REV$0$A-PLMB-SHOWER", "fixture-any"),
+        ("1 BR-C$0$S-COLS", "column"),
+        ("1 BR-F_1st Floor$0$A-FURN", "furniture-any"),
+
+        # -- architectural plumbing is fixtures; P- discipline pipework is not -
+        ("A-PLMB", "fixture-any"),
+        ("PLUMBSYMB", "fixture-any"),
+        ("A-Plumbing Fixtures", "fixture-any"),
+        ("P-PLMB-PIPE", "pipe"),
+        ("P-PLUMB-WASTE", "pipe"),
+        ("P-SANR-VENT", "pipe"),
+
         # -- families the layer names cannot resolve: coarse, never a guess ---
         ("P-SANR-FIXT", "fixture-any"),
         ("A-FLOR-PFIX", "fixture-any"),
