@@ -71,7 +71,26 @@ class ImgEmbed(nn.Module):
 
         nn.init.normal_(self.bottleneck.weight, mean=0.0, std=0.01)
         nn.init.constant_(self.bottleneck.bias, 0)
-    
+
+        # Frozen BatchNorm in the image backbone (default on). HRNet's BN uses
+        # momentum 0.01; at one image per step, train mode normalises each
+        # drawing by its own statistics while eval mode uses running averages
+        # that barely move, so the rest of the network learns on features it
+        # never sees at test time. Measured on one drawing trained to
+        # near-zero loss: eval-mode accuracy 0.35 with live BN, 0.77 with the
+        # image branch's BN in the same mode as training. Keeping the
+        # pretrained statistics fixed removes the mismatch; the affine
+        # parameters still train.
+        self.freeze_bn = bool(getattr(cfg.vision, "freeze_bn", True))
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.freeze_bn:
+            for m in self.EmbedBackbone.modules():
+                if isinstance(m, nn.modules.batchnorm._BatchNorm):
+                    m.eval()
+        return self
+
 
     def forward(self, image, x_batch):
 

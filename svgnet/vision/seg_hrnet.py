@@ -473,8 +473,21 @@ class HighResolutionNet(nn.Module):
             pretrained_dict = torch.load(pretrained, map_location="cpu", weights_only=False)
             logger.info('> loading pretrained model {}'.format(pretrained))
             model_dict = self.state_dict()
+            # The HRNet-OCR release saves the backbone under "model." (it wraps
+            # the network in a segmentation module). Filtering by exact key
+            # name matched 0 of 1,830 tensors, silently: every run so far
+            # trained the image branch from a 0.001-std random init while the
+            # log said "loading pretrained model".
+            pretrained_dict = {(k[len("model."):] if k.startswith("model.") else k): v
+                               for k, v in pretrained_dict.items()}
             pretrained_dict = {k: v for k, v in pretrained_dict.items()
-                               if k in model_dict.keys()}
+                               if k in model_dict and v.shape == model_dict[k].shape}
+            logger.info('> matched {} of {} backbone tensors'.format(
+                len(pretrained_dict), len(model_dict)))
+            if len(pretrained_dict) < 0.5 * len(model_dict):
+                raise RuntimeError(
+                    f"> {pretrained} matched only {len(pretrained_dict)} of "
+                    f"{len(model_dict)} tensors -- wrong checkpoint for this backbone?")
             model_dict.update(pretrained_dict)
             self.load_state_dict(model_dict)
         elif not pretrained:
