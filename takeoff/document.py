@@ -67,17 +67,40 @@ def _mm(pt, origin_pt, mm_per_pt):
 
 
 _ROLES = [
+    # "... FLOOR PLAN & INTERIOR ELEVATIONS" is a plan sheet, hence the lookahead.
+    ("not_a_plan", re.compile(r"\bELEV\b\.?|^(?!.*\bPLAN\b).*ELEVATIONS?\s*$|\bDETAILS?\b|"
+                              r"ACCESS\s+(PANEL|DOOR)|"
+                              r"\bKEY\b|\bLEGEND\b|\bNOTES\b|\bSCHEDULE\b|ARCHITECTS?\b|\bPLLC\b|"
+                              r"\bINC\b\.?|\bLLC\b", re.I)),
     ("reflected_ceiling", re.compile(r"REFLECTED|CEILING|\bRCP\b", re.I)),
-    ("electrical", re.compile(r"LIGHTING|ELECTRICAL|POWER", re.I)),
-    ("mep", re.compile(r"MECHANICAL|HVAC|PLUMBING|FIRE\s*(ALARM|SPRINKLER|PROTECTION)", re.I)),
-    ("structural", re.compile(r"FRAMING|FOUNDATION|SLAB|STRUCTURAL", re.I)),
-    ("roof", re.compile(r"\bROOF\b", re.I)),
+    ("electrical", re.compile(r"LIGHTING|ELECTRICAL|POWER|\bLOW\s+VOLTAGE", re.I)),
+    ("mep", re.compile(r"MECHANICAL|HVAC|PLUMBING|FIRE\s*(ALARM|SPRINKLER|PROTECTION)|"
+                       r"DOMESTIC\s+WATER|SANITARY|\bWASTE\b|\bVENT\b|GAS\s+PIPING|"
+                       r"SPRINKLER|DUCTWORK|\bPIPING\b|\bSYST?EMS\b|RADON", re.I)),
+    ("structural", re.compile(r"FRAMING|FOUNDATION|SLAB|STRUCTURAL|SHEAR\s*WALL|FOOTING|"
+                              r"\bCOLUMN\b", re.I)),
+    ("roof", re.compile(r"\bROOF\b|\bATTIC\b|DRAFTSTOP", re.I)),
     ("site", re.compile(r"\bSITE\b|GRADING|LANDSCAPE|UTILITY\s+PLAN", re.I)),
     ("demolition", re.compile(r"\bDEMO(LITION)?\b", re.I)),
-    ("enlarged_plan", re.compile(r"ENLARGED|\bUNIT\b|TYPICAL\s+(UNIT|APARTMENT)", re.I)),
+    # A title that is only a sheet number names its discipline by the prefix.
+    ("structural", re.compile(r"^\s*S-?\d{1,3}(\.\d+)?\s*$", re.I)),
+    ("mep", re.compile(r"^\s*[MP]-?\d{1,3}(\.\d+)?\s*$", re.I)),
+    ("electrical", re.compile(r"^\s*E-?\d{1,3}(\.\d+)?\s*$", re.I)),
+    ("enlarged_plan", re.compile(r"ENLARGED|\bUNIT\b|TYPICAL\s+(UNIT|APARTMENT)|"
+                                 r"\bBEDROOM\b|\bEFFICIENCY\b|\d+\s*S\.?\s*F\.?\b", re.I)),
     ("floor_plan", re.compile(r"FLOOR\s*PLAN|\bLEVEL\b|DIMENSION\s*PLAN|OVERALL", re.I)),
 ]
 COUNTED_ROLES = ("floor_plan", "enlarged_plan", "plan", "untitled")
+
+# "68 REQUIRED A2 - ONE BEDROOM", "3 REQ'D @BLDGs #1, #6 & #7": how many times
+# the drawn unit or building is built. Reported, never multiplied into the
+# totals -- an overall floor plan may already draw the same units.
+_REQUIRED = re.compile(r"\b(\d{1,4})\s*(?:REQ(?:'?D|UIRED)|TYP(?:ICAL)?\s+OF)\b", re.I)
+
+
+def required_count(title):
+    m = _REQUIRED.search(title or "")
+    return int(m.group(1)) if m else None
 
 
 def viewport_role(kind, title):
@@ -86,7 +109,9 @@ def viewport_role(kind, title):
     A reflected ceiling plan, a lighting plan and a framing plan all draw the
     walls and doors again, and classify_viewports keeps them as "plan" because
     their geometry is good training data. Counted, they are the second, third
-    and fourth copy of every door on the floor.
+    and fourth copy of every door on the floor. Order matters: "ENLARGED UNIT
+    PLAN - DOMESTIC WATER" is plumbing, so disciplines are tested before
+    "unit" / "floor plan".
     """
     if kind == "untitled":
         return "untitled"
@@ -125,6 +150,7 @@ def page_entry(page_no, sheet, objects, args, lengths, openings, rooms, viewport
         if key not in entry["viewports"]:
             sc = scale_at(x, y)
             entry["viewports"][key] = {"kind": kind, "role": role,
+                                       "required_count": required_count(title),
                                        "scale": sc.text or f"x{sc.factor:g}",
                                        "scale_factor": sc.factor, "scale_source": sc.source}
         return role, key

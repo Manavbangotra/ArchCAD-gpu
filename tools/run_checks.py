@@ -26,6 +26,7 @@ CHECKS = [
     ("room tags parse", "dataset/test_room_names.py", False),
     ("instance clustering", "dataset/test_cluster.py", False),
     ("takeoff geometry", "takeoff/test_takeoff.py", False),
+    ("takeoff drawing roles", "takeoff/test_roles.py", False),
     ("corrections reach the loader", "dataset/test_corrections.py", True),
     ("loader/editor/weights agree", "dataset/test_merge_agreement.py", True),
     ("set loss over target rows", "tools/test_set_loss.py", True),
