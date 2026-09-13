@@ -74,11 +74,15 @@ def main():
         # have no counterpart in FloorPlanCAD or a US layer set.
         check("bg" in gotA, "room polygons should remain background")
 
-        # Nothing above background may carry an instance id -- the classifier
-        # head has no column for a coarse class.
+        # Background carries no instance; coarse ids above it do. The marginal
+        # loss scores a coarse target as one object, so two doors sharing
+        # instance -1 would be learned as a single door.
         for sem, ins in zip(arch["semanticIds"], arch["instanceIds"]):
-            if sem >= TX.ARCH_BG and ins != -1:
-                FAILURES.append(f"class {sem} above bg carries instance {ins}")
+            if sem == TX.ARCH_BG and ins != -1:
+                FAILURES.append(f"background carries instance {ins}")
+                break
+            if sem in TX.COARSE_GROUPS and ins == -1:
+                FAILURES.append(f"coarse class {sem} has no instance id")
                 break
 
         # n_layers used to be hardcoded to 4, which was the class count at the

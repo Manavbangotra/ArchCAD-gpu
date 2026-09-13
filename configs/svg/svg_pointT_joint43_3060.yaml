@@ -1,5 +1,5 @@
-# Stage 2: one model on FloorPlanCAD + the US plan corpus (+ CubiCasa5K when
-# converted), Arch-43, one RTX 3060 (12 GB).
+# Stage 2: one model on FloorPlanCAD + the US plan corpus + CubiCasa5K,
+# Arch-43, one RTX 3060 (12 GB).
 #
 # Start from Stage 1 (svg_pointT_fpcad43_3060.yaml): FloorPlanCAD is the only
 # source that labels the fine classes everywhere -- which toilet, which door --
@@ -110,22 +110,22 @@ data:
     sources:
       - name: fpcad
         data_root: dataset/FloorplanCAD/json
-        weight: 0.4
+        weight: 0.35
         annotated: fpcad
       - name: us
         data_root: dataset/us_plans/json5
         file_list: dataset/us_plans/json5/{split}_selected.txt
-        weight: 0.6
+        weight: 0.45
         annotated: us
         coarse_policy: keep
-      # Enable once converted:
-      #   python dataset/parse_cubicasa.py --data_dir dataset/cubicasa5k/cubicasa5k \
-      #       --output_dir dataset/cubicasa5k/json/train --taxonomy arch --split_file .../train.txt
-      # - name: cubicasa
-      #   data_root: dataset/cubicasa5k/json
-      #   weight: 0.2
-      #   annotated: cubicasa
-      #   coarse_policy: keep
+      # CubiCasa5K (dataset/parse_cubicasa.py --taxonomy arch): 4,197 plans of
+      # residential outlines, ~560 primitives each. Clean drawings, real room
+      # layouts, labelled sanitary and kitchen fixtures -- but no loose furniture.
+      - name: cubicasa
+        data_root: dataset/cubicasa5k/json
+        weight: 0.2
+        annotated: cubicasa
+        coarse_policy: keep
 
   test:
     type: multi
@@ -145,6 +145,11 @@ data:
         file_list: dataset/us_plans/json5/{split}_selected.txt
         max_samples: 500
         annotated: us
+        coarse_policy: keep
+      - name: cubicasa
+        data_root: dataset/cubicasa5k/json
+        max_samples: 400
+        annotated: cubicasa
         coarse_policy: keep
 
 dataloader:

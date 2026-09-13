@@ -177,9 +177,11 @@ def parse_svg(svg_path, with_text=False, taxonomy="us4"):
         widths.append(1.0)
         rgbs.append([0, 0, 0])
         sem_ids.append(cls)
-        # Coarse ids sit above background and carry no single class, so they
-        # get no instance either -- same rule the model applies.
-        ins_ids.append(instance if cls < bg_id else -1)
+        # Only background has no instance. Coarse ids (door-any, fixture-any)
+        # sit above background but are still objects: giving them -1 made
+        # every door on a plan one "stuff" mask -- 1.0 door per plan against
+        # 6.9 windows -- which the marginal loss would then learn as one door.
+        ins_ids.append(instance if cls != bg_id else -1)
         # NOT the class. CubiCasa has no CAD layers, and setting layerId to the
         # class hands the answer straight to the model as an input. A per-group
         # counter is structural information a real drawing could also provide.
