@@ -4,9 +4,9 @@ Method ported from bim-ai geometry/room_builder.py (raster flood), run on the
 model's wall and window primitives instead of detected wall segments:
 
 1. draw wall, curtain-wall, railing and window primitives onto a mask;
-2. morphological close with a door-width kernel, sealing door openings so a
-   room does not leak into the corridor (without bim-ai's grow-back dilation,
-   which overstated areas by ~17% -- see build_rooms);
+2. seal doorways with the detected doors' boxes and close only small drafting
+   gaps (bim-ai closes with a door-width kernel, which also fills closets and
+   corridors narrower than a door is wide -- see build_rooms);
 3. connected components of what is left are candidate rooms; anything touching
    the drawing's border is the outside;
 4. contour -> simplified polygon, area from pixels x scale^2;
@@ -27,7 +27,8 @@ import numpy as np
 sys.path.insert(0, osp.join(osp.dirname(osp.dirname(osp.abspath(__file__))), "dataset"))
 import room_names  # noqa: E402
 
-DOOR_SEAL_MM = 1150.0         # seals openings up to a double door
+DOOR_SEAL_MM = 1150.0         # fallback seal when no door boxes are given
+SMALL_GAP_MM = 150.0          # drafting gaps between wall lines, not openings
 ROOM_MIN_M2 = 1.2
 ROOM_MAX_M2 = 2500.0
 UNNAMED_MIN_M2 = 3.0
@@ -55,14 +56,24 @@ def _raster_frame(args, prims):
     return x0, y0, x1, y1
 
 
-def build_rooms(args, barrier_prims, mm_per_pt, lines):
+def build_rooms(args, barrier_prims, mm_per_pt, lines, door_boxes=()):
     """Rooms from barrier primitives on one page (or one viewport).
 
     args           page primitive control points (8 numbers each), PDF points, y up
     barrier_prims  indices of wall / curtain wall / railing / window primitives
     mm_per_pt      real millimetres per PDF point for this drawing
     lines          (text, (x0, y0, x1, y1)) text lines, PDF points, y up
+    door_boxes     (x0, y0, x1, y1) of detected doors, PDF points
+
+    Doorways are sealed with the doors themselves, not with a door-width
+    closing. bim-ai closes the wall mask with a ~1.15 m kernel, which also
+    fills every space narrower than that -- closets, corridors, a WIC -- so
+    they never came out as rooms. Here the closing only bridges drafting gaps
+    (SMALL_GAP_MM), each door's box is a barrier, and afterwards the door-box
+    pixels are handed back to the nearest room so no area is lost.
     """
+    from scipy import ndimage
+
     barrier_prims = np.asarray(barrier_prims, dtype=np.int64)
     if barrier_prims.size < 4 or mm_per_pt <= 0:
         return []
@@ -83,28 +94,51 @@ def build_rooms(args, barrier_prims, mm_per_pt, lines):
         cv2.polylines(mask, [np.round(pts).astype(np.int32)], False, 255, 2)
 
     mm_per_px = mm_per_pt / r
-    seal = max(3, int(round(DOOR_SEAL_MM / mm_per_px)) | 1)
+    doors = np.zeros((H, W), np.uint8)
+    for (dx0, dy0, dx1, dy1) in door_boxes:
+        u0, v0 = to_px(dx0, dy1)
+        u1, v1 = to_px(dx1, dy0)
+        cv2.rectangle(doors, (int(u0), int(v0)), (int(np.ceil(u1)), int(np.ceil(v1))), 255, -1)
+
+    gap = max(3, int(round(SMALL_GAP_MM / mm_per_px)) | 1)
     sealed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
-                              cv2.getStructuringElement(cv2.MORPH_RECT, (seal, seal)))
+                              cv2.getStructuringElement(cv2.MORPH_RECT, (gap, gap)))
+    sealed = cv2.bitwise_or(sealed, doors)
+    if not door_boxes:
+        # No door geometry to seal with: fall back to the door-width closing.
+        seal = max(3, int(round(DOOR_SEAL_MM / mm_per_px)) | 1)
+        sealed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                                  cv2.getStructuringElement(cv2.MORPH_RECT, (seal, seal)))
     free = cv2.bitwise_not(sealed)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(free, connectivity=4)
 
     px_m2 = (mm_per_px ** 2) / 1e6
-    rooms = []
+    keep = np.zeros(n, dtype=bool)
     for i in range(1, n):
         x, y, bw, bh, area = stats[i]
-        if not (ROOM_MIN_M2 <= area * px_m2 <= ROOM_MAX_M2):
-            continue
         if x <= 1 or y <= 1 or x + bw >= W - 1 or y + bh >= H - 1:
             continue                                     # the outside world
-        # No grow-back. bim-ai dilates the component by half the seal "to give
-        # back what the seal ate", but closing only fills gaps narrower than
-        # the kernel -- a room's own interior is untouched -- and the dilation
-        # leaks through the door gap and across thin wall lines: a drawn
-        # 12' x 10' room measured 141 sq ft with it and 118.8 without (the
-        # 1.2 missing is half the drawn wall line).
-        ys, xs, ye, xe = y, x, y + bh, x + bw
-        comp = (labels[ys:ye, xs:xe] == i).astype(np.uint8) * 255
+        if area * px_m2 <= ROOM_MAX_M2:
+            keep[i] = True
+    labels = np.where(keep[labels], labels, 0).astype(np.int32)
+
+    # Door boxes back to the nearest kept room: a doorway's floor belongs to
+    # the rooms on either side of it, split down the middle.
+    if door_boxes and keep.any():
+        give = (doors > 0) & (mask == 0)
+        _, (iy, ix) = ndimage.distance_transform_edt(labels == 0, return_indices=True)
+        near = labels[iy, ix]
+        labels = np.where(give & (labels == 0), near, labels)
+
+    rooms = []
+    found = ndimage.find_objects(labels)
+    for i, sl in enumerate(found, start=1):
+        if sl is None or not keep[i]:
+            continue
+        comp = (labels[sl] == i).astype(np.uint8) * 255
+        area = float(cv2.countNonZero(comp)) * px_m2
+        if not (ROOM_MIN_M2 <= area <= ROOM_MAX_M2):
+            continue
         contours, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             continue
@@ -112,8 +146,9 @@ def build_rooms(args, barrier_prims, mm_per_pt, lines):
         poly = cv2.approxPolyDP(cnt, 0.01 * cv2.arcLength(cnt, True), True).reshape(-1, 2)
         if len(poly) < 3:
             continue
+        ys, xs = sl[0].start, sl[1].start
         poly_pt = [((px + xs) / r + bx0, by1 - (py + ys) / r) for px, py in poly.tolist()]
-        rooms.append(Room(poly_pt, round(float(cv2.contourArea(cnt)) * px_m2, 2)))
+        rooms.append(Room(poly_pt, round(area, 2)))
 
     _name_rooms(rooms, lines)
     rooms = [rm for rm in rooms if rm.name or rm.area_m2 >= UNNAMED_MIN_M2]

@@ -54,6 +54,8 @@ def test_rooms():
         ("LAUN.", "storage"),
         ("W/D", "storage"),
         ("STORAGE", "storage"),
+        ("MECH.", "storage"),
+        ("CLO", "storage"),
         ("ENTRY", "entry/hallway"),
         ("FOYER", "entry/hallway"),
         ("CORRIDOR", "entry/hallway"),
@@ -73,7 +75,8 @@ def test_not_rooms():
                  "DOOR SCHEDULE", "BATH ACCESSORIES", "KITCHEN ELEVATION",
                  "SEE NOTES", "FLOOR PLAN", "", None, "CL 2X4",
                  "THIS IS A VERY LONG NOTE ABOUT THE BEDROOM CLOSET FINISHES",
-                 '01/A3.0 24" G.B. BATH #1']:      # a callout merged onto a tag
+                 '01/A3.0 24" G.B. BATH #1',       # a callout merged onto a tag
+                 "MECH. GRILL", "EXHAUST FAN ABOVE", "CLOSET ABOVE"]:
         check(r.parse(text), None, f"parse({text!r}) should reject")
 
 

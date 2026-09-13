@@ -102,6 +102,22 @@ def test_rooms():
         check(bed[0].is_sleeping, "a bedroom is a sleeping room")
     check(any(r.name == "LIVING" for r in found), "the L-shaped living room is found and named")
 
+    # With the door detected: a 3' deep closet off the bedroom must come out
+    # as its own room. A door-width closing (the fallback) fills it solid.
+    closet = [_seg(W, 0, W + 3 * ft, 0), _seg(W + 3 * ft, 0, W + 3 * ft, 6 * ft),
+              _seg(W + 3 * ft, 6 * ft, W, 6 * ft)]
+    args2 = args[:2] + [_seg(W, 6 * ft, W, H), _seg(W, 0, W, 1 * ft)] + args[3:] + closet
+    door_bedroom = (4 * ft, -1.0, 7 * ft, 3 * ft)          # swing into the room
+    door_closet = (W - 2.0, 1 * ft, W + 0.5 * ft, 6 * ft)    # bifold, 6" deep, across the front
+    lines2 = lines + [("CLOSET", (W + 0.8 * ft, 3 * ft - 3, W + 2.8 * ft, 3 * ft + 3))]
+    found = rooms.build_rooms(args2, list(range(len(args2))), mm_per_pt, lines2,
+                              door_boxes=[door_bedroom, door_closet])
+    names = {r.name: round(r.area_m2 * 10.7639) for r in found}
+    check("CLOSET" in names, f"a narrow closet is a room when doors seal it: {names}")
+    if "BEDROOM #2" in names:
+        check(abs(names["BEDROOM #2"] - 120) <= 10,
+              f"door boxes are given back to the rooms: bedroom {names['BEDROOM #2']} sq ft")
+
 
 def test_opening_tags():
     class Ob:

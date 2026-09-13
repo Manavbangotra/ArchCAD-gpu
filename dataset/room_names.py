@@ -84,7 +84,11 @@ _STANDALONE_ONLY = {"BA", "CL", "BR", "PAN", "LIN", "GAR", "JAN", "FAM", "DIN", 
 _NOT_A_ROOM = re.compile(
     r"LEGEND|SCHEDULE|\bNOTES?\b|ACCESSOR|RECEPT|PANEL|SEALANT|PENETRAT|\bTYP\b|"
     r"DETAIL|SECTION|ELEVATION|\bELEV\b\.?|\bSCALE\b|\bPLAN\b|KEYNOTE|\bSEE\b|"
-    r"\bEXISTING\b|\bDEMO\b|\bN\.?T\.?S\b|\bSIM\b|\bREF\b|CEILING|\bHDR\b|\bSOFFIT\b",
+    r"\bEXISTING\b|\bDEMO\b|\bN\.?T\.?S\b|\bSIM\b|\bREF\b|CEILING|\bHDR\b|\bSOFFIT\b|"
+    # HVAC and device notes printed inside rooms: "MECH. GRILL" in a corridor
+    # read as a mechanical room.
+    r"GRILLE?|DIFFUSER|REGISTER|EXHAUST|\bFAN\b|\bDUCT|\bVENT\b|LOUVER|THERMOSTAT|"
+    r"DETECTOR|\bOUTLET|\bABOVE\b|\bBELOW\b|\bCLG\b",
     re.I)
 
 # Fixture and opening tags: WC-1, W-3, D12A, GD-2. These are the most common false

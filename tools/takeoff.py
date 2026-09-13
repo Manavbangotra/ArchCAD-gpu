@@ -143,7 +143,9 @@ def main():
     ap.add_argument("--checkpoint")
     ap.add_argument("--pages", default="", help="e.g. 3-5,9 (1-based); default all")
     ap.add_argument("--schedules", help="Schedule-detection planset JSON for this PDF")
-    ap.add_argument("--max_page_prims", type=int, default=120000)
+    # Overall floor plans of a multi-storey building run to 300k+ primitives;
+    # they are exactly the sheets a takeoff needs, and parse in seconds now.
+    ap.add_argument("--max_page_prims", type=int, default=800000)
     ap.add_argument("--page_time_budget", type=float, default=120.0,
                     help="seconds to spend parsing one sheet's vectors before skipping it")
     ap.add_argument("--device")
@@ -213,8 +215,10 @@ def main():
             # Rooms per drawing scale: the door-width seal is in real millimetres,
             # so drawings at different scales need their own raster. Grouping by
             # title instead split one plan's walls between neighbouring titles.
-            groups = {}
+            groups, door_boxes = {}, []
             for ob in objects:
+                if ob.label in document.DOOR_CLASSES:
+                    door_boxes.append(openings_mod.bbox_of(args, ob.prims))
                 if ob.label not in document.BARRIER_CLASSES:
                     continue
                 pts = np.asarray([args[j] for j in ob.prims], dtype=np.float64).reshape(-1, 8)
@@ -225,7 +229,8 @@ def main():
                 groups.setdefault(mm_per_pt, []).append(ob.prims)
             rooms = []
             for mm_per_pt, prims in groups.items():
-                rooms += rooms_mod.build_rooms(args, np.concatenate(prims), mm_per_pt, lines)
+                rooms += rooms_mod.build_rooms(args, np.concatenate(prims), mm_per_pt, lines,
+                                               door_boxes=door_boxes)
 
             entry = document.page_entry(i, {}, objects, args, data["lengths"], ops, rooms,
                                         viewport_of, scales.at, pdf_origin=origin)
