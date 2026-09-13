@@ -29,6 +29,7 @@ import os
 import os.path as osp
 import re
 import subprocess
+import time
 import sys
 
 import numpy as np
@@ -98,9 +99,18 @@ class PlanExtractor:
 
     MAX_XOBJECT_DEPTH = 12   # guards against pathological or cyclic Form nesting
 
-    def __init__(self, pdf):
+    def __init__(self, pdf, time_budget=None):
         self.pdf = pdf
         self.prims = []
+        # A block placed many times is one Form XObject drawn many times;
+        # parse its content stream once. Parsed operator lists are cached per
+        # object (the transform is applied at draw time, not parse time).
+        self._ops_cache = {}
+        # Optional wall-clock budget (seconds). Checked cooperatively, so an
+        # interactive tool can give up on a pathological sheet instead of
+        # stalling; the corpus builder leaves it unset.
+        self.deadline = (time.monotonic() + time_budget) if time_budget else None
+        self.timed_out = False
 
     # -- layer resolution -------------------------------------------------- #
     @staticmethod
@@ -140,10 +150,15 @@ class PlanExtractor:
     def run(self, stream_owner, resources, ctm, layer, depth=0):
         import pikepdf
 
-        try:
-            ops = pikepdf.parse_content_stream(stream_owner)
-        except Exception:
-            return
+        key = getattr(stream_owner, "objgen", None) if depth else None
+        ops = self._ops_cache.get(key) if key and key != (0, 0) else None
+        if ops is None:
+            try:
+                ops = list(pikepdf.parse_content_stream(stream_owner))
+            except Exception:
+                return
+            if key and key != (0, 0):
+                self._ops_cache[key] = ops
 
         try:
             props = resources.Properties
@@ -167,7 +182,12 @@ class PlanExtractor:
         cur = None               # current point
         pending = []             # (points, kind, length) awaiting a paint op
 
-        for instr in ops:
+        for n_op, instr in enumerate(ops):
+            if self.timed_out:
+                return
+            if self.deadline and not (n_op & 4095) and time.monotonic() > self.deadline:
+                self.timed_out = True
+                return
             op = str(instr.operator)
             args = instr.operands
 
@@ -320,16 +340,22 @@ def cluster_instances(prims, sem, tol, bg_id=BACKGROUND):
             key = (sem[i], int(x // tol), int(y // tol))
             buckets.setdefault(key, []).append(i)
 
-    for key, members in buckets.items():
-        cls, gx, gy = key
+    # Every endpoint in a cell joins every endpoint in the 3x3 neighbourhood.
+    # That is the same connectivity as joining each cell's members to one
+    # another and each cell to its neighbours through one representative --
+    # which is linear. The all-pairs version was quadratic in cell occupancy:
+    # a hatched sheet with 212k primitives made 167M union calls (81 s).
+    for members in buckets.values():
+        first = members[0]
+        for b in members[1:]:
+            union(first, b)
+    for (cls, gx, gy), members in buckets.items():
         # Also look at neighbouring cells so a join across a cell edge still merges.
-        near = []
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
-                near.extend(buckets.get((cls, gx + dx, gy + dy), ()))
-        for a in members:
-            for b in near:
-                union(a, b)
+                other = buckets.get((cls, gx + dx, gy + dy))
+                if other:
+                    union(members[0], other[0])
 
     remap, nxt = {}, 0
     for i in range(n):
@@ -352,13 +378,16 @@ def cluster_instances(prims, sem, tol, bg_id=BACKGROUND):
 # page -> json
 # --------------------------------------------------------------------------- #
 def parse_page(pdf, page, page_index, render_png=None, cluster_tol_frac=0.004,
-               taxonomy="us4"):
-    ex = PlanExtractor(pdf)
+               taxonomy="us4", time_budget=None):
+    ex = PlanExtractor(pdf, time_budget=time_budget)
     try:
         res = page.Resources
     except Exception:
         res = None
     ex.run(page, res, (1, 0, 0, 1, 0, 0), None)
+    if ex.timed_out:
+        raise TimeoutError(f"page {page_index}: vector parse exceeded {time_budget:g} s "
+                           f"({len(ex.prims)} primitives so far)")
 
     prims = ex.prims
     if not prims:
