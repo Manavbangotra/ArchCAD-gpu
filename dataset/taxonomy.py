@@ -521,3 +521,47 @@ def from_cubicasa_arch(class_attr):
     if "fixedfurniture" in flat:
         return FURNITURE_ANY
     return ARCH_BG
+
+
+# ---------------------------------------------------------------------------
+# What each training source actually annotates
+# ---------------------------------------------------------------------------
+# Training on three sources at once only works if the loss knows what each one
+# leaves unlabelled. An unmatched query is pushed to background; on a source
+# that never labels toilets, that teaches "a toilet is nothing" on every tile
+# that contains one. svgnet/model/label_space.py turns these lists into a mask:
+# for classes a source does not annotate, an unmatched prediction is not
+# penalised. Background is always annotated.
+#
+# A class belongs here only if the source labels it *wherever it occurs*, not
+# merely somewhere -- a handful of hand-corrected toilets does not make the US
+# corpus a toilet source, and listing it would punish the model for every
+# uncorrected one.
+
+_DOOR_MEMBERS = COARSE_GROUPS[DOOR_ANY]
+
+ANNOTATED = {
+    # FloorPlanCAD labels its own 35 classes everywhere and nothing else.
+    "fpcad": list(range(35)),
+
+    # US plan sets, from CAD layers. Doors come as door-any from A-DOOR layers
+    # on every layered project, so an unmatched door prediction is a real false
+    # positive and the members count as annotated. Furniture, fixtures and
+    # appliances are not: 0 of 760 layer names identify a toilet, bed or sofa,
+    # and furniture layers are absent on many projects.
+    "us": sorted(set(_DOOR_MEMBERS) | {6, 7, 8, 27, 28, 29, 31, 32, 33, 34,
+                                      35, 36, 37, 38, 39, 40, 41, 42}),
+
+    # CubiCasa5K labels openings, walls, railings, stairs and its FixedFurniture
+    # (sanitary, kitchen, wardrobes) but not loose furniture -- beds, sofas,
+    # chairs and tables are absent from its SVGs.
+    "cubicasa": sorted(set(_DOOR_MEMBERS) | {6, 15, 17, 18, 19, 21, 22, 23, 25, 26,
+                                            27, 32, 34, 38}),
+}
+
+# FloorPlanCAD draws these as one mask per class per drawing (instanceId -1).
+# Joint training uses the same convention for every source, or "wall" would be
+# one object in one dataset and twelve in another.
+STUFF_CLASSES = [30, 31, 32, 33, 34]    # row chairs, parking spot, wall, curtain wall, railing
+
+assert all(0 <= c < ARCH_BG for ids in ANNOTATED.values() for c in ids)

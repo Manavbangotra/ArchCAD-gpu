@@ -161,12 +161,14 @@ class SetCriterion(nn.Module):
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        # int64 wide enough for coarse ids (51-54), which index target rows, not
+        # head columns.
         target_classes = torch.full(
             src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device
         )
         target_classes[idx] = target_classes_o
 
-        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+        loss_ce = self._set_nll(src_logits, target_classes, idx, indices, targets)
         losses = {"loss_ce"+prefix: loss_ce * self.weight_dict["loss_ce"]} 
         #target_classes_onehot = F.one_hot(target_classes, num_classes=src_logits.shape[2]).float()
         #loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_masks) * src_logits.shape[1]
@@ -174,6 +176,45 @@ class SetCriterion(nn.Module):
 
         return losses
     
+    def _set_nll(self, src_logits, target_classes, idx, indices, targets):
+        """Weighted -log(sum of softmax over each query's target row).
+
+        With one-hot rows this is exactly
+        F.cross_entropy(logits, target_classes, weight=self.empty_weight), so
+        fully labelled data trains as before. It differs in two cases (see
+        svgnet/model/label_space.py):
+
+        * a query matched to a coarse id (fixture-any) is scored on the sum of
+          its members' probabilities, weighted by the members' mean weight;
+        * with a per-source `annotated` mask, an unmatched query is scored on
+          background plus every class that source never labels, so a US tile
+          stops teaching that a toilet is nothing.
+        """
+        t = targets[0]
+        num_cols = src_logits.shape[-1]
+        if "label_rows" not in t:
+            return F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+
+        bg = self.num_classes
+        rows = F.one_hot(torch.full_like(target_classes, bg), num_cols).bool()   # [B,Q,C+1]
+        if len(idx[0]):
+            tgt = torch.cat([t_["label_rows"][J] for t_, (_, J) in zip(targets, indices)])
+            rows[idx] = tgt
+        unmatched = torch.ones_like(target_classes, dtype=torch.bool)
+        unmatched[idx] = False
+
+        rows_f = rows.float()
+        w = (rows_f * self.empty_weight).sum(-1) / rows_f.sum(-1).clamp(min=1)
+
+        ann = t.get("annotated")
+        if ann is not None:
+            rows = rows | (unmatched.unsqueeze(-1) & ~ann.bool().view(1, 1, -1))
+
+        log_z = torch.logsumexp(src_logits, -1)
+        log_r = torch.logsumexp(src_logits.masked_fill(~rows, float("-inf")), -1)
+        nll = log_z - log_r
+        return (w * nll).sum() / w.sum().clamp(min=1e-12)
+
     def loss_masks(self, outputs, targets, indices, num_masks,prefix=''):
         """Compute the losses related to the masks: the focal loss and the dice loss.
         targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
@@ -264,7 +305,10 @@ class SetCriterion(nn.Module):
         if self.training and outputs.get('dn_out') is not None:
             dn_out_without_aux= {k:v for k,v in outputs['dn_out'].items() if k!='aux_outputs'}
             dn_args = outputs["dn_out"]['dn_args']
-            indices = [(dn_args, dn_args)]
+            # Denoising query k reconstructs target dn_args[k]. Pairing target index
+            # with itself only worked while every target got a query; coarse ids
+            # (fixture-any) get none, so the indices stop being contiguous.
+            indices = [(torch.arange(len(dn_args), device=dn_args.device), dn_args)]
              
             for loss in self.losses:
                 losses.update(self.get_loss(loss, dn_out_without_aux, targets, indices, num_masks,prefix='_dn'))

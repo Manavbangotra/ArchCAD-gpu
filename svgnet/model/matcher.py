@@ -124,7 +124,12 @@ class HungarianMatcher(nn.Module):
                 # Compute the dice loss betwen masks
                 cost_dice = batch_dice_loss_jit(out_mask, tgt_mask)
                 iou = (1-cost_dice) / (1+cost_dice + 1e-8)
-                _out_prob = out_prob[:, tgt_ids] * iou
+                rows = targets[b].get("label_rows")
+                if rows is not None:
+                    # Coarse ids score as the sum of their members' probability.
+                    _out_prob = (out_prob.float() @ rows.float().T) * iou
+                else:
+                    _out_prob = out_prob[:, tgt_ids] * iou
                 neg_cost_class = (1 - alpha) * (_out_prob ** gamma) * (-(1 - _out_prob + 1e-5).log())
                 pos_cost_class = alpha * ((1 - _out_prob) ** gamma) * (-(_out_prob + 1e-5).log())
                 cost_class = pos_cost_class  - neg_cost_class 

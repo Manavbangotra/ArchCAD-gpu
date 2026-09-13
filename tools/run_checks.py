@@ -26,6 +26,8 @@ CHECKS = [
     ("room tags parse", "dataset/test_room_names.py", False),
     ("corrections reach the loader", "dataset/test_corrections.py", True),
     ("loader/editor/weights agree", "dataset/test_merge_agreement.py", True),
+    ("set loss over target rows", "tools/test_set_loss.py", True),
+    ("multi-source batches", "tools/test_multi_source.py", True),
 ]
 
 

@@ -169,7 +169,8 @@ class SVGDataset(Dataset):
 
     def __init__(self, data_root, split, data_norm, aug, img_size=980,
                  repeat=1, split_path=None, num_classes=NUM_CLASSES, logger=None,
-                 use_corrections=True, coarse_policy="bg"):
+                 use_corrections=True, coarse_policy="bg", source=None, annotated=None,
+                 stuff_classes=None, index_base=0, max_samples=0):
         self.data_root = data_root
         self.split = split
         self.data_norm = data_norm
@@ -196,6 +197,38 @@ class SVGDataset(Dataset):
                 f"No '*_s2.json' files found under {data_root} (split={split}). "
                 "Run dataset/parse_FpCAD_svg.py first."
             )
+
+        # A fixed, evenly spaced subset -- for per-epoch validation on a sample
+        # rather than the full test set. Deterministic, so epochs compare.
+        if max_samples and len(self.data_list) > int(max_samples):
+            keep = np.linspace(0, len(self.data_list) - 1, int(max_samples)).round().astype(int)
+            self.data_list = [self.data_list[i] for i in keep]
+            if logger is not None:
+                logger.info(f"  {source or data_root}: evaluating a fixed subset of "
+                            f"{len(self.data_list)} drawings")
+
+        # Multi-source training (svgnet/data/multi.py). `index_base` keeps the
+        # per-sample instance/layer id offsets unique across sources; `annotated`
+        # is a class-id list or a preset name from dataset/taxonomy.py ANNOTATED;
+        # `stuff_classes` ("default" = taxonomy.STUFF_CLASSES) forces one mask per
+        # class, FloorPlanCAD's convention for walls and railings.
+        self.source = source
+        self.index_base = int(index_base)
+        if isinstance(annotated, str):
+            from taxonomy import ANNOTATED
+            annotated = ANNOTATED[annotated]
+        if isinstance(stuff_classes, str):
+            from taxonomy import STUFF_CLASSES
+            stuff_classes = STUFF_CLASSES
+        self.stuff_classes = list(stuff_classes) if stuff_classes else None
+        self.annotated = None
+        if annotated is not None:
+            m = torch.zeros(self.num_classes + 1, dtype=torch.bool)
+            for c in annotated:
+                if 0 <= int(c) < self.num_classes:
+                    m[int(c)] = True
+            m[self.num_classes] = True
+            self.annotated = m
 
         self.data_idx = np.arange(len(self.data_list))
         self.instance_queues = []
@@ -283,7 +316,7 @@ class SVGDataset(Dataset):
     @staticmethod
     def load(data_root=None, file_name=None, idx=0, min_points=2048,
              json_file=None, img_size=None, num_classes=NUM_CLASSES,
-             use_corrections=True, coarse_policy="bg"):
+             use_corrections=True, coarse_policy="bg", stuff_classes=None):
         """Read one drawing.
 
         Accepts either an explicit `json_file`, or `data_root` + `file_name`
@@ -402,6 +435,8 @@ class SVGDataset(Dataset):
 
         instanceIds = np.full(max_num, -1)
         ins = np.array(data["instanceIds"]).astype(np.int64)
+        if stuff_classes:
+            ins[np.isin(semanticIds[:num], stuff_classes)] = -1
         # Offset instance ids per sample so they stay unique after batching.
         valid = ins != -1
         ins[valid] += idx * min_points
@@ -448,15 +483,20 @@ class SVGDataset(Dataset):
         data_idx = self.data_idx[idx % len(self.data_idx)]
         json_file = self.data_list[data_idx]
         coord, feat, label, lengths, layerIds, img, _, _ = SVGDataset.load(
-            json_file=json_file, idx=idx, img_size=self.img_size,
+            json_file=json_file, idx=idx + getattr(self, "index_base", 0), img_size=self.img_size,
             num_classes=self.num_classes,
             use_corrections=self.use_corrections,
             coarse_policy=self.coarse_policy,
+            stuff_classes=getattr(self, "stuff_classes", None),
         )
 
         if self.split == "train" and self.aug:
-            return self.transform_train(coord, feat, label, lengths, layerIds, img, json_file)
-        return self.transform_test(coord, feat, label, lengths, layerIds, img, json_file)
+            out = self.transform_train(coord, feat, label, lengths, layerIds, img, json_file)
+        else:
+            out = self.transform_test(coord, feat, label, lengths, layerIds, img, json_file)
+        meta = {"source": getattr(self, "source", None),
+                "annotated": getattr(self, "annotated", None)}
+        return out[:-1] + (meta, out[-1])
 
     def _finalize(self, coord, feat, label, lengths, layerIds, img, json_file):
         """Shared tail: derive image sampling centres, then normalise coords.
@@ -577,13 +617,23 @@ class SVGDataset(Dataset):
     # batching
     # ------------------------------------------------------------------ #
     def collate_fn(self, batch):
-        """Assemble the 9-tuple that SVGNet.forward unpacks.
+        """Assemble the 10-tuple that SVGNet.forward unpacks (meta before names).
 
         Point tensors are concatenated into one flat array and delimited by
         `offsets`; images and centres stay as per-sample lists because the
         image pathway indexes them individually.
         """
-        coord, feat, label, lengths, layerIds, imgs, centers, json_file = list(zip(*batch))
+        coord, feat, label, lengths, layerIds, imgs, centers, metas, json_file = list(zip(*batch))
+
+        # Batch metadata for the loss. A class counts as annotated only if every
+        # drawing in the batch annotates it: a query can land on any of them.
+        masks = [m["annotated"] for m in metas if m["annotated"] is not None]
+        annotated = None
+        if masks:
+            annotated = masks[0].clone()
+            for m in masks[1:]:
+                annotated &= m
+        meta = {"source": [m["source"] for m in metas], "annotated": annotated}
 
         offset, count = [], 0
         for item in coord:
@@ -599,5 +649,6 @@ class SVGDataset(Dataset):
             torch.cat(layerIds),
             list(imgs),
             list(centers),
+            meta,
             list(json_file),
         )

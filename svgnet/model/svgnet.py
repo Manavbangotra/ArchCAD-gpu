@@ -17,6 +17,7 @@ from .pointtransformer import Model as PointT
 #from .pointnet2 import Model as PointT
 from .decoder import Decoder
 from ..vision.vision_embed import ImgEmbed #
+from .label_space import target_rows, usable
 
 
 import numpy as np
@@ -35,16 +36,23 @@ class SVGNet(nn.Module):
         self.decoder = Decoder(cfg,self.backbone.planes)
         self.num_classes = cfg.semantic_classes
         self.test_object_score = 0.1
+        # Head columns each target id covers (coarse ids -> their members).
+        self.register_buffer("target_rows", target_rows(self.num_classes), persistent=False)
         
     def train(self, mode=True):
         super().train(mode)
         
     def forward(self, batch,return_loss=True):
-        coords,feats,semantic_labels,offsets,lengths,layerIds, imgs, center, json_file = batch
-        return self._forward(coords,feats,offsets,semantic_labels,lengths,layerIds,imgs,center,json_file,return_loss=return_loss)
+        # 9 fields from hand-built batches (tools/inference.py); 10 when the
+        # loader adds per-batch source metadata ahead of the file names.
+        coords,feats,semantic_labels,offsets,lengths,layerIds, imgs, center, *rest = batch
+        json_file = rest[-1]
+        meta = rest[0] if len(rest) == 2 else None
+        return self._forward(coords,feats,offsets,semantic_labels,lengths,layerIds,imgs,center,json_file,
+                             return_loss=return_loss, meta=meta)
 
      
-    def prepare_targets(self,semantic_labels,bg_ind=-1,bg_sem=None):
+    def prepare_targets(self,semantic_labels,bg_ind=-1,bg_sem=None,meta=None):
         # Background id follows the class count, so this works for both the
         # 30-class ArchCAD setup and the 35-class FloorPlanCAD setup.
         if bg_sem is None:
@@ -52,13 +60,56 @@ class SVGNet(nn.Module):
 
         instance_ids = semantic_labels[:,1].cpu().numpy()
         semantic_ids = semantic_labels[:,0].cpu().numpy()
-        
+        svg_len = semantic_ids.shape[0]
+
+        # One target per distinct (semantic, instance) pair, in order of first
+        # appearance. This was a Python list-membership scan plus a set
+        # intersection per key -- O(N x K) interpreter work, seconds per step on
+        # a 6,000-primitive US tile with hundreds of instances.
+        pairs = np.stack([semantic_ids, instance_ids], axis=1)
+        uniq, first, inverse = np.unique(pairs, axis=0, return_index=True, return_inverse=True)
+        inverse = inverse.reshape(-1)
+        order = np.argsort(first, kind="stable")
+
+        keep = [k for k in order if usable(self.target_rows, int(uniq[k, 0]), bg_sem)]
+        if keep:
+            col = {k: j for j, k in enumerate(keep)}
+            lut = np.full(len(uniq), -1, dtype=np.int64)
+            for k, j in col.items():
+                lut[k] = j
+            which = torch.from_numpy(lut[inverse])
+            hit = which >= 0
+            mask_targets = torch.zeros(svg_len, len(keep))
+            mask_targets[torch.nonzero(hit).squeeze(1), which[hit]] = 1
+            cls_targets = torch.tensor([int(uniq[k, 0]) for k in keep])
+        else:
+            cls_targets = torch.tensor([bg_sem])
+            mask_targets = torch.zeros(svg_len, 1)
+
+        target = {
+            "labels": cls_targets.to(semantic_labels.device),
+            "masks": mask_targets.to(semantic_labels.device),
+            "label_rows": self.target_rows.to(semantic_labels.device)[cls_targets.to(semantic_labels.device)],
+        }
+        if meta is not None and meta.get("annotated") is not None:
+            target["annotated"] = meta["annotated"].to(semantic_labels.device)
+        return [target]
+
+    def _prepare_targets_reference(self,semantic_labels,bg_ind=-1,bg_sem=None):
+        """The original per-key loop, kept only so the test can pin the
+        vectorised version to it."""
+        if bg_sem is None:
+            bg_sem = self.num_classes
+
+        instance_ids = semantic_labels[:,1].cpu().numpy()
+        semantic_ids = semantic_labels[:,0].cpu().numpy()
+
         keys = []
         for sem_id,ins_id in zip(semantic_ids,
                              instance_ids):
             if (sem_id,ins_id) not in keys:
                 keys.append((sem_id,ins_id))
-    
+
         cls_targets,mask_targets = [], []
         svg_len = semantic_ids.shape[0]
 
@@ -105,13 +156,14 @@ class SVGNet(nn.Module):
         imgs,
         centers,
         json_file,
-        return_loss=True
+        return_loss=True,
+        meta=None,
     ):
 
         img_embed = self.image_embed(imgs, centers) #
 
         stage_list={'inputs': {'p_out':coords,"f_out":feats,"offset":offsets},"semantic_labels":semantic_labels[:,0]}
-        targets = self.prepare_targets(semantic_labels)
+        targets = self.prepare_targets(semantic_labels, meta=meta)
         stage_list.update({"tgt":targets})
         
         stage_list = self.backbone(stage_list)
