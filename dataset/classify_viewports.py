@@ -132,20 +132,52 @@ def _big_lines(doc_page):
             and not SHEET_NO.match(b[1])]
 
 
-def page_titles(doc_page, media_y1, skip=frozenset()):
+def page_box(pdf_page):
+    """The page's CropBox (falling back to MediaBox) as raw PDF numbers.
+
+    Read through pikepdf, not PyMuPDF: PyMuPDF normalises its box properties,
+    returning a y-flipped CropBox and a transformation matrix that is off by the
+    box origin on sheets whose MediaBox does not start at (0, 0).
+    """
+    for key in ("/CropBox", "/MediaBox"):
+        try:
+            box = pdf_page.obj.get(key)
+            if box is not None:
+                x0, y0, x1, y1 = (float(v) for v in box)
+                return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+        except Exception:
+            continue
+    return 0.0, 0.0, 612.0, 792.0
+
+
+def to_pdf_space(x, y, box):
+    """A PyMuPDF text point (unrotated frame, y down, origin at the box corner)
+    in the PDF user space `parse_page` measures geometry in (y up).
+
+    Both terms of the box matter. The old code flipped y against MediaBox.y1
+    but never added the box's x origin, which is invisible on the usual
+    (0, 0)-based sheet and wrong everywhere else: 246 of 1,687 corpus pages have
+    a non-zero MediaBox origin (documents 524, 660, 697, 700, 713, 738, 747), and
+    on 524 p59 -- MediaBox [-1512, -1080, 648, 1944] -- only 15 of 43 titles
+    landed in the right tile. With the origin added, all 43 do.
+    """
+    return x + box[0], box[3] - y
+
+
+def page_titles(doc_page, box, skip=frozenset()):
     """Titled drawings on this sheet as (kind, x, y, text) in PDF space, y-up.
 
     PyMuPDF reports text boxes in the unrotated page frame with y growing down,
-    which is the frame `parse_page` measures geometry in once y is flipped --
-    checked on a rotated sheet, where all 11 titles then landed inside the
-    geometry bounding box and the derotated variants did not.
+    which is the frame `parse_page` measures geometry in once mapped by
+    `to_pdf_space` -- checked on a rotated sheet, where all 11 titles then landed
+    inside the geometry bounding box and the derotated variants did not.
     """
     out = []
     for _size, text, (x0, y0, x1, y1) in _big_lines(doc_page):
         if text in skip:
             continue
-        out.append((title_kind(text), (x0 + x1) / 2.0,
-                    media_y1 - (y0 + y1) / 2.0, text))
+        px, py = to_pdf_space((x0 + x1) / 2.0, (y0 + y1) / 2.0, box)
+        out.append((title_kind(text), px, py, text))
     return out
 
 
@@ -210,11 +242,10 @@ def main():
 
             try:
                 dp = doc[i - 1]
-                titles = page_titles(dp, dp.mediabox.y1, skip)
+                titles = page_titles(dp, page_box(page), skip)
             except Exception:
                 titles = []
 
-            ox0, oy0 = data["origin"]
             page_plan_only = (titles and all(t[0] == "plan" for t in titles))
 
             for suffix, tile in tile_sheet(
