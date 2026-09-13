@@ -72,7 +72,8 @@ def test_not_rooms():
     for text in ["WC-1", "WC-2", "W-3", "D12A", "GD-2", "12'-0\" X 11'-6\"", "142 SF",
                  "DOOR SCHEDULE", "BATH ACCESSORIES", "KITCHEN ELEVATION",
                  "SEE NOTES", "FLOOR PLAN", "", None, "CL 2X4",
-                 "THIS IS A VERY LONG NOTE ABOUT THE BEDROOM CLOSET FINISHES"]:
+                 "THIS IS A VERY LONG NOTE ABOUT THE BEDROOM CLOSET FINISHES",
+                 '01/A3.0 24" G.B. BATH #1']:      # a callout merged onto a tag
         check(r.parse(text), None, f"parse({text!r}) should reject")
 
 

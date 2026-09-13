@@ -91,8 +91,12 @@ _NOT_A_ROOM = re.compile(
 # positive -- 423 "WC-1"/"WC-2" on one document alone.
 _TAG = re.compile(r"^(WC|W|D|DR|WD|GD|SD|P|L|T)[-.\s]?\d+[A-Z]?$", re.I)
 
-# Dimensions and areas are not names: 12'-0" X 11'-6", 142 SF.
-_DIMENSION = re.compile(r"\d+\s*['′]|\d+\s*(SF|SQ\.?\s*FT)\b|\d+\s*[xX]\s*\d+", re.I)
+# Dimensions and areas are not names: 12'-0" X 11'-6", 142 SF, 24" G.B.
+_DIMENSION = re.compile(r"\d+\s*['′\"”″]|\d+\s*(SF|SQ\.?\s*FT)\b|\d+\s*[xX]\s*\d+", re.I)
+
+# Detail and section callouts: 01/A3.0, 5/A-501. A room tag stacked under one
+# must not absorb it.
+_CALLOUT = re.compile(r"\b\d{1,2}\s*/\s*[A-Z]{1,2}[-.]?\d", re.I)
 
 
 def _tokens(text):
@@ -119,7 +123,8 @@ def parse(text):
     name = clean(text)
     if not name or len(name) > 40:
         return None
-    if _TAG.match(name) or _NOT_A_ROOM.search(name) or _DIMENSION.search(name):
+    if _TAG.match(name) or _NOT_A_ROOM.search(name) or _DIMENSION.search(name) \
+            or _CALLOUT.search(name):
         return None
     toks = _tokens(name)
     words = [w for w in toks if not w.isdigit() and not re.fullmatch(r"[A-Z]?\d+[A-Z]?", w)]
