@@ -23,6 +23,9 @@ _WINDOW_TAG = re.compile(r"^W-?\d{1,3}[A-Z]?$")
 _DOOR_TAG = re.compile(r"^(?:G?D-?\d{1,3}[A-Z]?|\d{3}[A-Z]?)$")
 _GENERIC_TAG = re.compile(r"^(?:[A-Z]?\d{1,3}[A-Z]?|[A-Z]{1,2})$")
 
+# A token that can be a mark: "D-107A", "01", "W3", "B" -- not "FLOOR" or "1ST".
+_MARKISH = re.compile(r"^(?:[A-Z]{0,3}-?\d{1,4}[A-Z]?|[A-Z]{1,2})$", re.I)
+
 TAG_RADIUS_MM = 1500.0        # a tag sits within ~5 ft of its opening
 MM_PER_INCH = 25.4
 
@@ -48,7 +51,10 @@ def load_schedule(path):
     for it in doc.get("items", []):
         cat = str(it.get("category", "")).lower()
         if cat in out and it.get("mark"):
-            out[cat].setdefault(norm_mark(it["mark"]), it)
+            # A schedule row can carry several marks ("D-107A D-107B D-106").
+            for mark in str(it["mark"]).split():
+                if _MARKISH.match(mark):
+                    out[cat].setdefault(norm_mark(mark), it)
     return out
 
 

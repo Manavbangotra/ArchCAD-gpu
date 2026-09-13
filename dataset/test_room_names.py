@@ -82,6 +82,8 @@ def test_not_rooms():
 
 def test_name_kept():
     check(r.parse("  BEDROOM   #1. "), ("BEDROOM #1", r.BEDROOM), "name is cleaned")
+    check(r.parse("BATHROOM WC-1A"), ("BATHROOM", r.BATH), "a fixture tag on the line is dropped")
+    check(r.parse("L-1 BATHROOM"), ("BATHROOM", r.BATH), "also before the name")
 
 
 def test_merge_stacked():

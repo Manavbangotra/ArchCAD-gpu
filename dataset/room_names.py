@@ -95,6 +95,10 @@ _NOT_A_ROOM = re.compile(
 # positive -- 423 "WC-1"/"WC-2" on one document alone.
 _TAG = re.compile(r"^(WC|W|D|DR|WD|GD|SD|P|L|T)[-.\s]?\d+[A-Z]?$", re.I)
 
+# The same tags when they share a line with a room name. A hyphen is required,
+# so a bare "L" or "P" in a real name survives.
+_INLINE_TAG = re.compile(r"\b(?:WC|W|D|DR|WD|GD|SD|P|L|T|S|U|WH|DW|FD|EF)-\d+[A-Z]?\b", re.I)
+
 # Dimensions and areas are not names: 12'-0" X 11'-6", 142 SF, 24" G.B.
 _DIMENSION = re.compile(r"\d+\s*['′\"”″]|\d+\s*(SF|SQ\.?\s*FT)\b|\d+\s*[xX]\s*\d+", re.I)
 
@@ -129,6 +133,11 @@ def parse(text):
         return None
     if _TAG.match(name) or _NOT_A_ROOM.search(name) or _DIMENSION.search(name) \
             or _CALLOUT.search(name):
+        return None
+    # Fixture and opening tags stacked with the room tag ("BATHROOM WC-1A",
+    # "L-1 BATHROOM") belong to the fixtures, not the name.
+    name = clean(_INLINE_TAG.sub(" ", name))
+    if not name:
         return None
     toks = _tokens(name)
     words = [w for w in toks if not w.isdigit() and not re.fullmatch(r"[A-Z]?\d+[A-Z]?", w)]
