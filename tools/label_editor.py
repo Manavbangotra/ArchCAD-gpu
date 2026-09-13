@@ -872,6 +872,11 @@ main{position:relative;overflow:hidden;background:var(--bg)}
 .cls i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:8px;vertical-align:-1px}
 .k{font:11px/1.7 ui-monospace,monospace;color:var(--muted);margin-top:14px}
 .stat{font:12px/1.7 ui-monospace,monospace}
+#tip{position:fixed;z-index:20;pointer-events:none;display:none;max-width:320px;
+     background:var(--panel);color:var(--ink);border:1px solid var(--rule);border-radius:6px;
+     padding:6px 9px;font-size:12px;line-height:1.45;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+#tip b{font-size:13px}#tip .m{color:var(--muted)}
+#svg line.hov{stroke-width:3.2px;stroke-opacity:1}
 #toast{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);background:var(--ink);
   color:var(--bg);padding:8px 14px;border-radius:6px;opacity:0;transition:.2s;font:12px ui-monospace,monospace}
 #toast.on{opacity:1}
@@ -926,6 +931,7 @@ main{position:relative;overflow:hidden;background:var(--bg)}
   </div>
   <div id=stage><img id=sheet><svg id=svg xmlns="http://www.w3.org/2000/svg"></svg><svg id=regs xmlns="http://www.w3.org/2000/svg"></svg></div>
   <div id=toast></div>
+  <div id=tip></div>
 </main>
 
 <aside class=r>
@@ -1056,6 +1062,10 @@ async function open_(i){
   const r=await fetch(`/api/tile?split=${t.split}&name=${encodeURIComponent(t.name)}`);
   data=await r.json(); over=Object.fromEntries(Object.entries(data.overrides||{}).map(([k,v])=>[+k,+v]));
   layermap=Object.assign({}, data.layermap||{});
+  // instance id -> primitive indices, built once per tile rather than per
+  // hover: a pointermove fires ~60 times a second.
+  OBJ={};
+  (data.instanceIds||[]).forEach((ins,i)=>{ if(ins!==-1) (OBJ[ins]=OBJ[ins]||[]).push(i); });
   projmap=Object.assign({}, data.projectLayermap||{});
   onlyLayer=null;
   al=Object.assign({dx:0,dy:0,sx:1,sy:1}, data.align||{});
@@ -1070,6 +1080,7 @@ async function open_(i){
 }
 
 function draw(){
+  LINE={}; HOV=null;
   const f=document.createDocumentFragment();
   data.args.forEach((a,i)=>{
     const c=cls(i);
@@ -1080,9 +1091,49 @@ function draw(){
     l.setAttribute("x2",a[6]);l.setAttribute("y2",a[7]);
     l.setAttribute("stroke",(CLASSES[c]||CLASSES[BG])[1]);
     l.dataset.i=i; if(i in over) l.classList.add("sel");
+    LINE[i]=l;
     f.appendChild(l);
   });
   svg.replaceChildren(f); counts();
+}
+let LINE={}, OBJ={}, HOV=null;
+// Hover: say what the thing under the cursor is labelled, which CAD layer it was
+// drawn on, and light up every line of the object it belongs to -- so you can
+// see "this whole shape is one fixture" before painting or accepting anything.
+function hover(e){
+  const tip=$("tip");
+  const el=e && document.elementFromPoint(e.clientX,e.clientY);
+  const i=(el && el.tagName==="line") ? +el.dataset.i : null;
+  const ins=(i===null || !data || !data.instanceIds) ? null : data.instanceIds[i];
+  const key=(i===null) ? null : (ins!==null && ins!==-1 ? "o"+ins : "p"+i);
+  if(key!==HOV){
+    if(HOV!==null) svg.querySelectorAll("line.hov").forEach(x=>x.classList.remove("hov"));
+    HOV=key;
+    if(key!==null){
+      const members=(ins!==null && ins!==-1 && OBJ[ins]) ? OBJ[ins] : [i];
+      members.forEach(j=>{ if(LINE[j]) LINE[j].classList.add("hov"); });
+    }
+  }
+  if(i===null){ tip.style.display="none"; return; }
+  const k=cls(i), entry=CLASSES[k]||["class "+k, "#888"];
+  const layer=layerOf(i);
+  const n=(ins!==null && ins!==-1 && OBJ[ins]) ? OBJ[ins].length : 1;
+  let extra="";
+  const g=COARSE[k];
+  if(g){
+    // A coarse label is a family, not an answer: say which members it could be.
+    const opts=g[1].map(m=>(CLASSES[m]||["?"])[0]).join(" / ");
+    extra=`<div class=m>not yet resolved &mdash; one of: ${opts}</div>`;
+  }
+  const src=(i in over) ? "hand-corrected" : (layer!==undefined && layer in layermap) ? "layer rule" : "from CAD layer";
+  tip.innerHTML=
+    `<b><span style="color:${entry[1]}">&#9632;</span> ${entry[0]}</b>`+extra+
+    `<div class=m>layer: ${layer===undefined?"(none)":layer}</div>`+
+    `<div class=m>${n>1 ? "object of "+n+" lines" : "single line"} &middot; ${src}</div>`;
+  tip.style.display="block";
+  const pad=14, w=tip.offsetWidth, h=tip.offsetHeight;
+  tip.style.left=Math.min(e.clientX+pad, innerWidth-w-8)+"px";
+  tip.style.top=Math.min(e.clientY+pad, innerHeight-h-8)+"px";
 }
 function counts(){
   // Keyed by id, not a dense array: coarse ids are 51+ and were counted
@@ -1309,8 +1360,10 @@ stage.addEventListener("pointermove",e=>{
     }
     showAlign(); apply(); return;}
   if(panning){view.x=e.clientX-panning.x;view.y=e.clientY-panning.y;apply();return;}
-  if(painting) hit(e);
+  if(painting){ hit(e); return; }
+  hover(e);
 });
+stage.addEventListener("pointerleave",()=>hover(null));
 addEventListener("pointerup",()=>{
   if(drawing){
     const r={x0:Math.min(drawing.x0,drawing.x1), y0:Math.min(drawing.y0,drawing.y1),
