@@ -139,7 +139,9 @@ dataloader:
 
 optimizer:
   type: 'AdamW'
-  lr: 0.0002
+  # 1e-4: 2e-4 made Stage-1 loss climb in epoch 2; a single-drawing
+  # overfit converges cleanly at 1e-4.
+  lr: 0.0001
   weight_decay: 0.1
   weight_decay_embed: 0.1
   decoder_multiplier: 1.0
@@ -153,11 +155,14 @@ scheduler:
   warmup_epochs: 3
   min_lr: 1e-7
 
-# fp16 verified on the 3060: ~0.9 s/step, 2.5-4.5 GB.
-fp16: True
-# ~2.5 h per epoch at 9,958 drawings. Early stopping ends the warm start once
-# validation mIoU stalls; the joint stage continues from best.pth.
-epochs: 30
+# fp32. Under fp16 the decoder's mask losses go NaN within ~5-14 epochs of
+# a 16-drawing overfit once the (now actually loaded) HRNet features are
+# live; fp32 on the same run stays finite. Open issue: find the overflowing op.
+fp16: False
+# A warm start, not the final model: FloorPlanCAD is 35% of the joint mix
+# anyway. 6 epochs (~2 h each in fp32) teaches the symbol classes, then
+# svg_pointT_joint43_3060.yaml continues from best.pth.
+epochs: 6
 step_epoch: 2
 save_freq: 10
 pretrain: ''

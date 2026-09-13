@@ -124,6 +124,18 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
         # makes the Hungarian matching and the loss very noisy. Accumulating
         # over `accumulate_steps` micro-batches restores the effective batch
         # without needing the memory for it.
+        if not torch.isfinite(loss):
+            # `loss > 0` is False for NaN, so non-finite losses used to be
+            # dropped without a trace. Count them; a run where they persist is
+            # broken (fp16 overflow in the decoder did exactly this).
+            skipped["nonfinite"] = skipped.get("nonfinite", 0) + 1
+            if skipped["nonfinite"] <= 5 or skipped["nonfinite"] % 100 == 0:
+                logger.warning(f"non-finite loss at batch {i} file={batch[-1]} "
+                               f"-- {skipped['nonfinite']} so far this epoch")
+            if i >= 50 and skipped["nonfinite"] > max(5, max_skip_frac * i):
+                raise RuntimeError(f"{skipped['nonfinite']} of {i} losses non-finite; "
+                                   "try fp16: False")
+            continue
         if loss > 0:
             # Scale so accumulated gradients average rather than sum.
             scaler.scale(loss / accum).backward()

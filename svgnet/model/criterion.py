@@ -225,7 +225,7 @@ class SetCriterion(nn.Module):
         tgt_idx = self._get_tgt_permutation_idx(indices)
         src_masks = outputs["pred_masks"]
         
-        src_masks = src_masks[src_idx]
+        src_masks = src_masks[src_idx].float()
         masks = [t["masks"].transpose(0,1).unsqueeze(0) for t in targets]
         target_masks = torch.cat(masks,dim=0)
         

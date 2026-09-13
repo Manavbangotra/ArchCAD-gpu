@@ -435,7 +435,13 @@ class Decoder(nn.Module):
         query_feat = self.decoder_norm(query_feat)
         mask_embed = self.mask_embed_head(query_feat)
         outputs_class = self.class_embed_head(query_feat)
-        output_masks = mask_embed @ mask_features.T
+        # Mask logits in float32. Under fp16 autocast the query x point dot
+        # product overflows (+/-65504) once features grow, the masks go
+        # inf/NaN, and the NaN reaches the weights: loss_mask and loss_dice
+        # turned NaN for every drawing within 5 epochs of a 16-drawing
+        # overfit, and never recovered. fp32 on the same run stayed finite.
+        with torch.autocast(device_type=mask_embed.device.type, enabled=False):
+            output_masks = mask_embed.float() @ mask_features.float().T
         if ret_attn_mask and step:
             attn_mask = output_masks.flatten(0,1).transpose(0,1)
             attn_mask = get_subscene_features("up", step, stage_list, attn_mask, torch.tensor([4, 4, 4, 4]))

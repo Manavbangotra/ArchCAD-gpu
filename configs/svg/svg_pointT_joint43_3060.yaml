@@ -162,7 +162,9 @@ dataloader:
 
 optimizer:
   type: 'AdamW'
-  lr: 0.0002
+  # 1e-4: 2e-4 made Stage-1 loss climb in epoch 2; a single-drawing
+  # overfit converges cleanly at 1e-4.
+  lr: 0.0001
   weight_decay: 0.1
   weight_decay_embed: 0.1
   decoder_multiplier: 1.0
@@ -176,7 +178,10 @@ scheduler:
   warmup_epochs: 1
   min_lr: 1e-7
 
-fp16: True
+# fp32. Under fp16 the decoder's mask losses go NaN within ~5-14 epochs of
+# a 16-drawing overfit once the (now actually loaded) HRNet features are
+# live; fp32 on the same run stays finite. Open issue: find the overflowing op.
+fp16: False
 epochs: 40
 step_epoch: 1
 save_freq: 10
