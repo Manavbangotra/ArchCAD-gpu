@@ -66,6 +66,21 @@ def text_layer(doc_page, box, origin):
     return words, lines
 
 
+def sheet_number(doc_page):
+    """The sheet's own number ("A4.2"), printed largest in the title block."""
+    from classify_viewports import SHEET_NO
+    best = (0.0, "")
+    for block in doc_page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            spans = line.get("spans") or []
+            text = "".join(sp["text"] for sp in spans).strip()
+            if spans and SHEET_NO.match(text):
+                size = max(sp["size"] for sp in spans)
+                if size > best[0]:
+                    best = (size, text)
+    return best[1]
+
+
 class TileModel:
     """The trained network, fed tiles exactly the way training fed them."""
 
@@ -239,7 +254,7 @@ def main():
                 rooms += rooms_mod.build_rooms(args, np.concatenate(prims), mm_per_pt, lines,
                                                door_boxes=door_boxes)
 
-            entry = document.page_entry(i, {}, objects, args, data["lengths"], ops, rooms,
+            entry = document.page_entry(i, {"sheet_no": sheet_number(doc[i - 1])}, objects, args, data["lengths"], ops, rooms,
                                         viewport_of, scales.at, pdf_origin=origin)
             if a.overlay_dir and any(entry[c] for c in ("doors", "windows", "rooms", "fixtures")):
                 from takeoff.overlay import draw_page
