@@ -392,7 +392,7 @@ def tiles():
 
 INDEX = None
 INDEX_PATH = None
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 
 
 def _index_key():
@@ -457,10 +457,15 @@ def summary(split, name):
     # 44-bin histogram on every row would triple the size of the index for no
     # benefit -- most tiles touch fewer than eight classes.
     top = [[k, v] for k, v in c.most_common() if k != BG][:4]
+    # Every class present, not just the top few: "show me tiles with doors on
+    # them" is the question a person actually asks, and doors are often the
+    # fifth-biggest thing on a sheet dominated by fixtures and casework.
+    present = sorted(k for k in c if k != BG)
     return {"split": split, "name": name,
             "project": (PROJ.match(name).group(1) if PROJ.match(name) else "?"),
             "n": len(d["semanticIds"]),
             "top": top,
+            "cls": present,
             "edited": osp.exists(ov) or osp.exists(lm),
             "kind": (VIEWPORTS.get(name) or {}).get("kind", "")}
 
@@ -537,6 +542,13 @@ class Handler(BaseHTTPRequestHandler):
                 rows = [r for r in rows if not sum(v for _, v in r.get("top", []))]
             if q.get("sort", ["content"])[0] == "content":
                 rows = sorted(rows, key=lambda r: -sum(v for _, v in r.get("top", [])))
+            want = q.get("cls", [None])[0]
+            if want not in (None, "", "any"):
+                try:
+                    wid = int(want)
+                    rows = [r for r in rows if wid in r.get("cls", [])]
+                except ValueError:
+                    pass
             kind = q.get("kind", [None])[0]
             if kind:
                 # Read from VIEWPORTS at request time, not from the index: the
@@ -555,9 +567,9 @@ class Handler(BaseHTTPRequestHandler):
             projects = sorted({r["project"] for r in rows})
             total = len(rows)
             try:
-                limit = max(1, min(20000, int(q.get("limit", ["4000"])[0])))
+                limit = max(1, min(20000, int(q.get("limit", ["1500"])[0])))
             except ValueError:
-                limit = 4000
+                limit = 1500
             rows = rows[:limit]
 
             # Verdicts are read at request time rather than cached into the
@@ -569,9 +581,14 @@ class Handler(BaseHTTPRequestHandler):
                 v = (_read_side(osp.join(ROOT, r["split"], r["name"]), "verdict")
                      if _has_side(r["name"], "verdict") else None)
                 vp = VIEWPORTS.get(r["name"]) or {}
-                out.append(dict(r, verdict=(v or {}).get("verdict", ""),
-                                kind=vp.get("kind", "unlabelled"),
-                                title=vp.get("title", "")[:60]))
+                # Only what the list actually draws. cls is the filter index
+                # and title is a tooltip; neither is worth carrying for every
+                # row, and the list payload is the one response whose size
+                # grows with the corpus.
+                row = {k: r[k] for k in ("split", "name", "project", "n", "top", "edited")}
+                row["verdict"] = (v or {}).get("verdict", "")
+                row["kind"] = vp.get("kind", "unlabelled")
+                out.append(row)
             return self._send(200, {"tiles": out, "view": VIEW,
                                     "total": total, "shown": len(out),
                                     "projects": projects})
@@ -844,6 +861,15 @@ main{position:relative;overflow:hidden;background:var(--bg)}
       <option value="name">by name</option>
     </select>
   </div>
+  <div style="padding:6px 12px 0;display:flex;gap:6px">
+    <select id=clsf style="flex:1"><option value="any">any class</option></select>
+    <select id=kindf style="flex:1">
+      <option value="">any sheet</option>
+      <option value="plan">plan only</option>
+      <option value="drop">elevation/detail</option>
+      <option value="untitled">untitled</option>
+    </select>
+  </div>
   <h2>Tiles</h2>
   <div id=list></div>
 </aside>
@@ -976,6 +1002,8 @@ async function loadList(project){
   if(project) qs.set("project",project);
   qs.set("content", ($("content")||{}).value || "labelled");
   qs.set("sort", ($("sort")||{}).value || "content");
+  const cf=($("clsf")||{}).value; if(cf && cf!=="any") qs.set("cls", cf);
+  const kf=($("kindf")||{}).value; if(kf) qs.set("kind", kf);
   const r=await fetch("/api/tiles?"+qs.toString());
   const j=await r.json(); TILES=j.tiles; VIEW=j.view||"";
   if(j.total && j.shown < j.total)
@@ -1371,6 +1399,14 @@ $("showbg").onchange=e=>{showbg=e.target.checked; draw();};
 $("list").onclick=e=>{const r=e.target.closest(".row"); if(r) open_(+r.dataset.i);};
 $("proj").onchange=e=>loadList(e.target.value);
 $("content").onchange = () => loadList($("proj").value);
+$("clsf").onchange    = () => loadList($("proj").value);
+$("kindf").onchange   = () => loadList($("proj").value);
+// Populate the class filter from the taxonomy, grouped like the palette.
+$("clsf").innerHTML = '<option value="any">any class</option>' +
+  FAMILIES.map(([fam,ids]) =>
+    `<optgroup label="${fam}">` +
+    ids.filter(k=>k!==BG).map(k=>`<option value="${k}">${CLASSES[k][0]}</option>`).join("") +
+    `</optgroup>`).join("");
 $("sort").onchange    = () => loadList($("proj").value);
 
 async function save(){
