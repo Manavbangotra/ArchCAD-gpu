@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 import torch
 
@@ -74,6 +75,10 @@ class VecData:
     sem_ids: torch.Tensor # shape is (N,), [N * [semantic_id]]
     inst_ids: torch.Tensor # shape is (N,), [N * [instance_id]]
     prim_lengths: torch.Tensor # shape is (N,), [N * [length]]
+    # ------------- text annotations (optional) ------------- #
+    # T annotations; see data/floorplancad/text_features.py. None when text is off.
+    text: Optional[dict] = None       # text_types (T,), text_attrs (T,3), text_grades (T,), text_masks (T,4), text_geo (T,3)
+    text_pos: Optional[torch.Tensor] = None   # (T, 2), normalised and augmented with the lines
 
 
 @dataclass

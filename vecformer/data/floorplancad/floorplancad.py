@@ -11,6 +11,7 @@ from .dataclass_define import (
     VecData,
     VecDataTransformArgs
 )
+from .text_features import encode_texts
 from .transform_utils import (
     to_tensor,
     norm_coords,
@@ -23,9 +24,15 @@ class FloorPlanCAD(Dataset):
 
     def __init__(self, root_dir: str, split: str,
                  train_transform_args: Dict[str, Any],
-                 eval_transform_args: Dict[str, Any]):
+                 eval_transform_args: Dict[str, Any],
+                 use_text: bool = False,
+                 max_texts: int = 512):
         self.root_dir = root_dir
         self.split = split
+        # Text annotations for the TextCAD-style model. Off by default, which keeps
+        # the upstream VecFormer data path unchanged.
+        self.use_text = use_text
+        self.max_texts = max_texts
         self.train_transform_args = train_transform_args
         self.eval_transform_args = eval_transform_args
         self.data_dir = os.path.join(root_dir, split)
@@ -61,6 +68,16 @@ class FloorPlanCAD(Dataset):
         # transform all line coords from [N * [x1, y1, x2, y2]] to [N * 2 * [x, y]] for easier processing
         if svg_data_tensor.coords.shape[-1] == 4:
             svg_data_tensor.coords = svg_data_tensor.coords.reshape(-1, 2, 2)
+        # Text positions ride along as zero-length lines, so normalisation and every
+        # random flip / rotation / scale / translation hits them exactly as it hits
+        # the geometry; they are split off again before features are computed.
+        text, n_lines = None, svg_data_tensor.coords.shape[0]
+        if self.use_text and svg_data_tensor.coords.dim() == 3:
+            encoded = encode_texts(data.texts, data.viewBox, self.max_texts)
+            if encoded is not None:
+                text, text_pos = encoded
+                svg_data_tensor.coords = torch.cat(
+                    [svg_data_tensor.coords, text_pos.unsqueeze(1).repeat(1, 2, 1)], dim=0)
         # ---------------- normalize lines --------------- #
         svg_data_tensor.coords = norm_coords(
             coords=svg_data_tensor.coords,
@@ -73,11 +90,17 @@ class FloorPlanCAD(Dataset):
             min_val=transform_args.norm_range[0],
             max_val=transform_args.norm_range[1],
             transform_args=transform_args)
+        text_pos = None
+        if text is not None:
+            text_pos = svg_data_tensor.coords[n_lines:, 0, :].clone()
+            svg_data_tensor.coords = svg_data_tensor.coords[:n_lines]
         # ------------ transform to line data ------------ #
         # transform all line coords back to [N * [x1, y1, x2, y2]]
         if len(svg_data_tensor.coords.shape) == 3:
             svg_data_tensor.coords = svg_data_tensor.coords.reshape(-1, 4)
         vec_data = to_vec_data(svg_data_tensor)
+        vec_data.text = text
+        vec_data.text_pos = text_pos
         return vec_data
 
 
@@ -145,5 +168,21 @@ class FloorPlanCAD(Dataset):
             # Data paths
             'data_paths': [item.data_path for item in batch]
         }
+
+        # Text annotations, only when the dataset was built with use_text. Every
+        # drawing contributes zero or more rows; text_cu_seqlens delimits them.
+        if any(item.text is not None for item in batch):
+            keys = ("text_types", "text_attrs", "text_grades", "text_masks", "text_geo")
+            empty = dict(text_types=torch.zeros(0, dtype=torch.long), text_attrs=torch.zeros(0, 3),
+                         text_grades=torch.zeros(0, dtype=torch.long), text_masks=torch.zeros(0, 4, dtype=torch.bool),
+                         text_geo=torch.zeros(0, 3))
+            parts = [item.text if item.text is not None else empty for item in batch]
+            for k in keys:
+                concat_data[k] = torch.cat([p[k] for p in parts], dim=0)
+            concat_data["text_pos"] = torch.cat(
+                [item.text_pos if item.text_pos is not None else torch.zeros(0, 2) for item in batch], dim=0)
+            n_text = torch.tensor([len(p["text_types"]) for p in parts], dtype=torch.int32)
+            concat_data["text_cu_seqlens"] = torch.cat(
+                [torch.tensor([0], dtype=torch.int32), torch.cumsum(n_text, dim=0, dtype=torch.int32)])
 
         return concat_data
