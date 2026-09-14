@@ -78,6 +78,11 @@ def main():
     check(len(walls) == 1 and walls[0].prims.size == 30, "wall primitives from voted semantics")
     check(not [o for o in objects if o.label == C], "no background objects")
 
+    cropped, n_crop = page_objects_swa(data, [], lambda x, y: sc, view, Oracle(), max_prims=12)
+    doors_c = [o for o in cropped if o.label == 0]
+    check(n_crop > n_win and len(doors_c) == 4 and all(o.prims.size == 3 for o in doors_c),
+          f"dense windows as crops: {n_crop} records, doors {[o.prims.tolist() for o in doors_c]}")
+
     from takeoff.vecformer_model import WindowModel
     sys.path.insert(0, osp.join(ROOT, "vecformer", "checks"))
     model = WindowModel(osp.join(ROOT, "vecformer", "configs", "model", "product_arch43.yaml"), cpu_kernels=True,

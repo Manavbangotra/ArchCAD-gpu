@@ -71,6 +71,19 @@ def main():
         idxs = rec["idxs"]
         check(len(idxs) == len(rec["semantic_ids"]) and
               [data["semanticIds"][i] for i in idxs] == rec["semantic_ids"], "idxs map window primitives to page primitives")
+    # a dense window: 400 primitives spread over one 10 m window, capped at 150 per crop
+    grid = [line(20 + (i % 20) * 28, 20 + (i // 20) * 28, 30 + (i % 20) * 28, 20 + (i // 20) * 28) for i in range(400)]
+    dense = dict(args=grid, commands=[0] * 400, semanticIds=[tx.FIXTURE_ANY] * 400, instanceIds=list(range(400)),
+                 layerIds=[0] * 400, layerNames=["A-PLMB"])
+    whole = U.convert_page(dense, [], lambda x, y: sc, lambda x, y: ("plan", ""), 10.0, 0.01, 1, 10 ** 9, {},
+                           keep_idxs=True, max_prims=0)
+    crops = U.convert_page(dense, [], lambda x, y: sc, lambda x, y: ("plan", ""), 10.0, 0.01, 1, 10 ** 9, {},
+                           keep_idxs=True, max_prims=150)
+    check(len(whole) == 1 and len(whole[0][1]["semantic_ids"]) == 400, "uncapped: one window")
+    check(len(crops) > 1 and all(len(r["semantic_ids"]) <= 150 for _, r in crops), f"crops under the cap: {[len(r['semantic_ids']) for _, r in crops]}")
+    check(set().union(*[set(r["idxs"]) for _, r in crops]) == set(range(400)), "crops cover every primitive")
+    check(all(r["viewBox"] == whole[0][1]["viewBox"] and "crop" in r["meta"] for _, r in crops),
+          "crops keep the window frame (same scale) and record their box")
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}):")
         for f in FAILURES:

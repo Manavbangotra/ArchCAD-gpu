@@ -80,6 +80,31 @@ def _densify(seg, max_len):
              x0 + (x1 - x0) * (i + 1) / n, y0 + (y1 - y0) * (i + 1) / n) for i in range(n)]
 
 
+def dense_crops(inside, cx, cy, box, max_prims, depth=0, max_depth=3):
+    """Split a window's primitives into overlapping crops of at most `max_prims`.
+
+    VecFormer's decoder builds query x primitive masks, and at evaluation every
+    primitive is a query: a 47k-primitive window needs ~9 GB per mask tensor. A
+    dense window is cut into four crops of 3/4 of its side (neighbours overlap by
+    half), recursively, but every crop keeps the parent window's frame and viewBox,
+    so symbols stay at the window's real-world scale. On plan set 461 p.66 with the
+    cap forced down to 1,500 (1,426 crops) layer objects come back 392 for 381 --
+    the extras are layer "instances" longer than a crop's overlap; with 5/8 crops it
+    was 403. At the default cap that sheet needs no crops and matches exactly. Yields
+    (crop box in page coordinates or None, primitive indices).
+    """
+    if not max_prims or inside.size <= max_prims or depth >= max_depth:
+        yield (box if depth else None), inside
+        return
+    x0, y0, x1, y1 = box
+    sx, sy = (x1 - x0) * 0.75, (y1 - y0) * 0.75
+    for bx in (x0, x1 - sx):
+        for by in (y0, y1 - sy):
+            sel = inside[(cx[inside] >= bx) & (cx[inside] < bx + sx) & (cy[inside] >= by) & (cy[inside] < by + sy)]
+            if sel.size:
+                yield from dense_crops(sel, cx, cy, (bx, by, bx + sx, by + sy), max_prims, depth + 1, max_depth)
+
+
 def windows(x0, y0, x1, y1, size, step):
     xs = [x0] if x1 - x0 <= size else [x0 + k * step for k in range(int(math.ceil((x1 - x0 - size) / step)) + 1)]
     ys = [y0] if y1 - y0 <= size else [y0 + k * step for k in range(int(math.ceil((y1 - y0 - size) / step)) + 1)]
@@ -87,11 +112,14 @@ def windows(x0, y0, x1, y1, size, step):
 
 
 def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_fg, max_segments, meta_base,
-                 step_ratio=0.5, keep_idxs=False):
+                 step_ratio=0.5, keep_idxs=False, max_prims=8000):
     """Windows of one parsed page -> list of (suffix, json dict).
 
     keep_idxs: add "idxs", the page primitive index of each window primitive, for
     recombining predictions at takeoff time (takeoff/swa.py); not written to the corpus.
+    max_prims: windows with more primitives are emitted as overlapping crops in the
+    same frame (dense_crops); a crop records its box as meta["crop"], window-local
+    [x0, y0, x1, y1] with y down.
     """
     import numpy as np
     args = data["args"]
@@ -119,57 +147,62 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
         gx0, gy0 = arr[idx, 0::2].min(), arr[idx, 1::2].min()
         gx1, gy1 = arr[idx, 0::2].max(), arr[idx, 1::2].max()
         for wx0, wy0, wx1, wy1 in windows(gx0, gy0, gx1, gy1, size, size * step_ratio):
-            inside = idx[(cx[idx] >= wx0) & (cx[idx] < wx1) & (cy[idx] >= wy0) & (cy[idx] < wy1)]
-            if inside.size == 0 or int((sem[inside] != tx.ARCH_BG).sum()) < min_fg:
-                continue
-            max_len = size * ratio
-            rec = dict(viewBox=[0.0, 0.0, size, size], coords=[], primitive_ids=[],
-                       layer_ids=[], semantic_ids=[], instance_ids=[], primitive_lengths=[], texts=[])
-            page_idxs = []
-            local_layers = {}
-            local_ins = {}
-            for pid, i in enumerate(inside.tolist()):
-                segs = [s for seg in _segments(args[i], cmds[i]) for s in _densify(seg, max_len)]
-                if not segs:
+            window_prims = idx[(cx[idx] >= wx0) & (cx[idx] < wx1) & (cy[idx] >= wy0) & (cy[idx] < wy1)]
+            for crop, inside in dense_crops(window_prims, cx, cy, (wx0, wy0, wx1, wy1), max_prims):
+                if inside.size == 0 or int((sem[inside] != tx.ARCH_BG).sum()) < min_fg:
                     continue
-                lid = local_layers.setdefault(int(layer[i]), len(local_layers))
-                for x0, y0, x1, y1 in segs:
-                    rec["coords"].append([round(x0 - wx0, 2), round(wy1 - y0, 2),       # y down
-                                          round(x1 - wx0, 2), round(wy1 - y1, 2)])
-                    rec["primitive_ids"].append(len(rec["semantic_ids"]))
-                    rec["layer_ids"].append(lid)
-                c = int(sem[i])
-                page_idxs.append(i)
-                rec["semantic_ids"].append(c)
-                if c == tx.ARCH_BG or c in STUFF or ins[i] < 0:
-                    rec["instance_ids"].append(-1)
-                else:
-                    rec["instance_ids"].append(local_ins.setdefault(int(ins[i]), len(local_ins) + 1))
-                rec["primitive_lengths"].append(round(sum(math.dist((s[0], s[1]), (s[2], s[3])) for s in segs), 3))
-            if len(rec["coords"]) > max_segments:
-                continue
-            rec["layer_names"] = [None] * len(local_layers)
-            for g, lid in local_layers.items():
-                rec["layer_names"][lid] = names[g] if g < len(names) else None
-            for text, (tx0, ty0, tx1, ty1) in text_lines:
-                mx, my = (tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0
-                if wx0 <= mx < wx1 and wy0 <= my < wy1:
-                    rec["texts"].append(dict(text=text[:64], x=round(mx - wx0, 2), y=round(wy1 - my, 2), size=round(abs(ty1 - ty0), 2),
-                                             angle=0.0, layer_id=-1))
-            wcx, wcy = (wx0 + wx1) / 2.0, (wy0 + wy1) / 2.0
-            sc = scale_at(wcx, wcy)
-            kind, title = viewport_of(wcx, wcy)
-            rec["meta"] = dict(meta_base, window_m=window_m, mm_per_pt=mm_per_pt, scale_source=sc.source,
-                               viewport_kind=kind, viewport_title=title)
-            if keep_idxs:
-                rec["idxs"] = page_idxs
-            out.append((f"_w{k:03d}", rec))
-            k += 1
+                max_len = size * ratio
+                rec = dict(viewBox=[0.0, 0.0, size, size], coords=[], primitive_ids=[],
+                           layer_ids=[], semantic_ids=[], instance_ids=[], primitive_lengths=[], texts=[])
+                page_idxs = []
+                local_layers = {}
+                local_ins = {}
+                for pid, i in enumerate(inside.tolist()):
+                    segs = [s for seg in _segments(args[i], cmds[i]) for s in _densify(seg, max_len)]
+                    if not segs:
+                        continue
+                    lid = local_layers.setdefault(int(layer[i]), len(local_layers))
+                    for x0, y0, x1, y1 in segs:
+                        rec["coords"].append([round(x0 - wx0, 2), round(wy1 - y0, 2),       # y down
+                                              round(x1 - wx0, 2), round(wy1 - y1, 2)])
+                        rec["primitive_ids"].append(len(rec["semantic_ids"]))
+                        rec["layer_ids"].append(lid)
+                    c = int(sem[i])
+                    page_idxs.append(i)
+                    rec["semantic_ids"].append(c)
+                    if c == tx.ARCH_BG or c in STUFF or ins[i] < 0:
+                        rec["instance_ids"].append(-1)
+                    else:
+                        rec["instance_ids"].append(local_ins.setdefault(int(ins[i]), len(local_ins) + 1))
+                    rec["primitive_lengths"].append(round(sum(math.dist((s[0], s[1]), (s[2], s[3])) for s in segs), 3))
+                if len(rec["coords"]) > max_segments:
+                    continue
+                rec["layer_names"] = [None] * len(local_layers)
+                for g, lid in local_layers.items():
+                    rec["layer_names"][lid] = names[g] if g < len(names) else None
+                tb = crop if crop is not None else (wx0, wy0, wx1, wy1)      # text of this crop only
+                for text, (tx0, ty0, tx1, ty1) in text_lines:
+                    mx, my = (tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0
+                    if tb[0] <= mx < tb[2] and tb[1] <= my < tb[3]:
+                        rec["texts"].append(dict(text=text[:64], x=round(mx - wx0, 2), y=round(wy1 - my, 2), size=round(abs(ty1 - ty0), 2),
+                                                 angle=0.0, layer_id=-1))
+                wcx, wcy = (wx0 + wx1) / 2.0, (wy0 + wy1) / 2.0
+                sc = scale_at(wcx, wcy)
+                kind, title = viewport_of(wcx, wcy)
+                rec["meta"] = dict(meta_base, window_m=window_m, mm_per_pt=mm_per_pt, scale_source=sc.source,
+                                   viewport_kind=kind, viewport_title=title)
+                if crop is not None:
+                    bx0, by0, bx1, by1 = crop
+                    rec["meta"]["crop"] = [round(bx0 - wx0, 2), round(wy1 - by1, 2), round(bx1 - wx0, 2), round(wy1 - by0, 2)]
+                if keep_idxs:
+                    rec["idxs"] = page_idxs
+                out.append((f"_w{k:03d}", rec))
+                k += 1
     return out
 
 
 def convert_document(job):
-    pdf_path, out_dir, window_m, ratio, min_fg, max_segments, budget, max_page_prims, pages, step_ratio = job
+    pdf_path, out_dir, window_m, ratio, min_fg, max_segments, budget, max_page_prims, pages, step_ratio, max_prims = job
     import pikepdf
     import pymupdf
     from classify_viewports import boilerplate, nearest_title, page_box, page_titles
@@ -208,7 +241,8 @@ def convert_document(job):
 
             scales = page_scales([(t, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for t, b in lines], words)
             for suffix, rec in convert_page(data, lines, scales.at, viewport_of, window_m, ratio, min_fg,
-                                            max_segments, dict(source="us", doc=stem, page=p), step_ratio):
+                                            max_segments, dict(source="us", doc=stem, page=p), step_ratio,
+                                            max_prims=max_prims):
                 with open(osp.join(out_dir, f"{stem}_p{p:04d}{suffix}.json"), "w") as f:
                     json.dump(rec, f, separators=(",", ":"))
                 written += 1
@@ -230,6 +264,8 @@ def main():
     ap.add_argument("--eval_step_ratio", type=float, default=1.0,
                     help="test windows: 1.0 = no overlap (overlap only adds training variety)")
     ap.add_argument("--max_segments", type=int, default=60000)
+    ap.add_argument("--max_prims", type=int, default=8000,
+                    help="split denser windows into overlapping same-frame crops (0 = never)")
     ap.add_argument("--page_time_budget", type=float, default=120.0)
     ap.add_argument("--max_page_prims", type=int, default=800000)
     ap.add_argument("--docs", nargs="*", help="only these document stems")
@@ -247,7 +283,7 @@ def main():
         os.makedirs(out, exist_ok=True)
         jobs.append((pdf, out, a.window_m, a.dynamic_sampling_ratio, a.min_fg, a.max_segments,
                      a.page_time_budget, a.max_page_prims, set(a.pages or []),
-                     a.step_ratio if side[stem] == "train" else a.eval_step_ratio))
+                     a.step_ratio if side[stem] == "train" else a.eval_step_ratio, a.max_prims))
     print(f"{len(jobs)} documents ({sum(1 for j in jobs if j[1].endswith('train'))} train)", flush=True)
     if a.workers > 1:
         from multiprocessing import Pool

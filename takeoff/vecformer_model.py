@@ -86,7 +86,7 @@ class WindowModel:
 
 
 def primitive_positions(rec):
-    """Centre of each window primitive, normalised to [-0.5, 0.5] of the window."""
+    """Centre of each window primitive, normalised to [-0.5, 0.5] of its window (or crop)."""
     coords = np.asarray(rec["coords"], dtype=np.float64).reshape(-1, 4)
     pid = np.asarray(rec["primitive_ids"], dtype=np.int64)
     n = len(rec["semantic_ids"])
@@ -94,12 +94,18 @@ def primitive_positions(rec):
     sums = np.zeros((n, 2))
     np.add.at(sums, pid, mid)
     counts = np.bincount(pid, minlength=n).clip(min=1)[:, None]
+    centres = sums / counts
+    crop = (rec.get("meta") or {}).get("crop")
+    if crop:
+        # a dense window's crop (to_lines_us.dense_crops): its edges are where symbols are cut
+        x0, y0, x1, y1 = crop
+        return (centres - [(x0 + x1) / 2, (y0 + y1) / 2]) / max(x1 - x0, y1 - y0)
     size = float(rec["viewBox"][2])
-    return sums / counts / size - 0.5
+    return centres / size - 0.5
 
 
 def page_objects_swa(data, text_lines, scale_at, viewport_of, model, window_m=10.0, step_ratio=0.5,
-                     sampling_ratio=0.01, **aggregate_kwargs):
+                     sampling_ratio=0.01, max_prims=8000, **aggregate_kwargs):
     """PageObjects for one parsed page from the model over sliding windows -> (objects, n_windows)."""
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
@@ -107,7 +113,8 @@ def page_objects_swa(data, text_lines, scale_at, viewport_of, model, window_m=10
     from to_lines_us import convert_page
 
     wins = convert_page(data, text_lines, scale_at, viewport_of, window_m, sampling_ratio, min_fg=0,
-                        max_segments=10 ** 9, meta_base={}, step_ratio=step_ratio, keep_idxs=True)
+                        max_segments=10 ** 9, meta_base={}, step_ratio=step_ratio, keep_idxs=True,
+                        max_prims=max_prims)
     if not wins:
         return [], 0
     preds = model.predict([rec for _, rec in wins])
