@@ -317,8 +317,10 @@ class VecFormer(PreTrainedModel):
           for panoptic instances.
         - Ignore and unknown ids score as background.
         - A prediction of a class this drawing's source does not annotate cannot be
-          judged: such instances are dropped, and such semantic predictions on
-          background primitives count as background.
+          judged: such instances are dropped, unless they match (IoU > 0.5) a coarse
+          target whose group contains the class -- a toilet on a US fixture-any object
+          is exactly the answer wanted -- and such semantic predictions on background
+          primitives count as background.
         """
         ls, C = self.label_space, self.num_semantic_classes
         out_p = dict(pred_masks=[], pred_labels=[], pred_sem_segs=[])
@@ -327,6 +329,7 @@ class VecFormer(PreTrainedModel):
             pred_sem = preds["pred_sem_segs"][b]
             sem = ls.resolve(targets["sem_labels"][b], pred_sem)
             labels, masks = targets["target_labels"][b], targets["target_masks"][b]
+            raw_labels = labels
             if labels.numel() and bool((labels > C).any()):
                 majority = torch.stack([
                     torch.mode(pred_sem[m]).values if m.any() else pred_sem.new_tensor(C) for m in masks])
@@ -334,6 +337,15 @@ class VecFormer(PreTrainedModel):
             ann = ls.annotated_classes(sources[b] if b < len(sources) else -1).to(pred_sem.device)
             p_lab, p_mask = preds["pred_labels"][b], preds["pred_masks"][b]
             keep = ann[p_lab.long().clamp(0, C)]
+            coarse_t = raw_labels.long() > C
+            if bool((~keep).any()) and bool(coarse_t.any()):
+                unjudged_idx = (~keep).nonzero(as_tuple=True)[0]
+                pm, tm = p_mask[unjudged_idx].float(), masks[coarse_t].float()
+                inter = pm @ tm.T
+                iou = inter / (pm.sum(1, keepdim=True) + tm.sum(1) - inter).clamp(min=1)
+                rows = ls.rows.to(pm.device)[raw_labels[coarse_t].long()]                # (Tc, C+1)
+                member = rows[:, p_lab[unjudged_idx].long().clamp(0, C)].T                # (Pu, Tc)
+                keep[unjudged_idx[((iou > 0.5) & member).any(1)]] = True
             unjudged = ~ann[pred_sem.long().clamp(0, C)] & (sem == C)
             pred_sem = torch.where(unjudged, torch.full_like(pred_sem, C), pred_sem)
             out_p["pred_masks"].append(p_mask[keep])

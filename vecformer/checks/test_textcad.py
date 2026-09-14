@@ -84,6 +84,13 @@ def main():
     check(torch.allclose(o_full, o_big, atol=1e-5), "knn >= text count equals full attention")
     check(bool(torch.isfinite(o_knn).all()) and not torch.allclose(o_knn, o_full, atol=1e-6),
           "knn attention runs and restricts the context")
+    torch.nn.init.normal_(msf.out.weight, std=0.1)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        try:
+            o_amp, _ = msf(feat.detach(), pos, batch, text)
+            check(o_amp.dtype == torch.float32 and bool(torch.isfinite(o_amp).all()), "mixed precision keeps the stage dtype")
+        except RuntimeError as exc:
+            check(False, f"mixed precision fusion failed: {exc}")
     empty = tc.TextContext(torch.zeros(0, 32), torch.zeros(0, 2), torch.zeros(0, dtype=torch.long))
     o3, l3 = msf(feat.detach(), pos, batch, empty)
     check(torch.allclose(o3, feat.detach()) and l3.item() == 0, "no text is a no-op")

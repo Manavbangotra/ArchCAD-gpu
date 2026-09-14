@@ -1,6 +1,6 @@
 # Phase 3: TextCAD reproduction on FloorPlanCAD-V2 (TextCAD split, 9533 train).
-# TextCAD: 700 epochs, lr 1e-4, warmup 5%. Batch 2 x 8 GPUs = 16 -> 596 steps/epoch,
-# 417,200 steps; decay over the last 20% (83,440); evaluate every 5 epochs.
+# TextCAD: 700 epochs, lr 1e-4, warmup 5%. Batch 2 x 8 GPUs = 16 -> 595 steps/epoch (drop_last),
+# 416,500 steps; decay over the last 20% (83,300); evaluate every 5 epochs.
 # -------------------------- log ------------------------- #
 log_level: info
 log_on_each_node: false
@@ -18,14 +18,14 @@ learning_rate: 0.0001
 lr_scheduler_type: warmup_stable_decay
 warmup_ratio: 0.05
 lr_scheduler_kwargs:
-    num_decay_steps: 83440
+    num_decay_steps: 83300
     min_lr_ratio: 0.1
 weight_decay: 0.05
 
 # ------------------------- eval ------------------------- #
 batch_eval_metrics: true
 eval_strategy: steps
-eval_steps: 2980
+eval_steps: 2975
 eval_on_start: true
 
 # ------------------------- save ------------------------- #

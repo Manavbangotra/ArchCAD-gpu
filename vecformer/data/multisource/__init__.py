@@ -16,7 +16,8 @@ CubiCasa5K), each a FloorPlanCAD-format dataset.
             - name: us
               root_dir: ../dataset/us_plans/lines
               weight: 0.45
-              splits: {val: test}   # split directory per role (default: same name)
+              val_from_train: {docs: 3, seed: 0}   # no val directory: hold out whole documents
+              splits: {test: test}  # split directory per role (default: same name)
         source_order: []            # must equal the model config's `sources`; empty = ANNOTATED order
 
 Training draws samples with replacement so each source contributes its `weight`
@@ -27,6 +28,8 @@ eval_fpcad_PQ, eval_us_PQ, ... and a pooled number cannot hide a regression on
 one source.
 """
 import os.path as osp
+import random
+import re
 import sys
 from typing import Dict, List
 
@@ -37,6 +40,18 @@ from data import DatasetSplits, register_dataset
 from data.floorplancad.floorplancad import FloorPlanCAD
 
 _DATASET_DIR = osp.abspath(osp.join(osp.dirname(__file__), "..", "..", "..", "dataset"))
+
+
+DOC_RE = re.compile(r"^(.*)_p\d{4}")
+
+
+def holdout_docs(paths, n_docs, seed=0):
+    """Choose `n_docs` documents (file-name stem before _pNNNN) from a file list ->
+    (train paths, val paths). Whole documents, so no building is on both sides."""
+    doc_of = lambda p: (DOC_RE.match(osp.basename(p)) or [None, osp.basename(p)])[1]   # noqa: E731
+    docs = sorted({doc_of(p) for p in paths})
+    held = set(random.Random(seed).sample(docs, min(n_docs, max(len(docs) - 1, 0))))
+    return [p for p in paths if doc_of(p) not in held], [p for p in paths if doc_of(p) in held]
 
 
 def default_source_order() -> List[str]:
@@ -80,11 +95,19 @@ def build_sources(dataset_args: dict):
             ds.split = "train" if role == "train" else "val"
             return ds
 
+        holdout = src.get("val_from_train")
+        if holdout:
+            tr, va = make("train"), make("train")
+            va.split = "val"
+            tr.data_paths, va.data_paths = holdout_docs(tr.data_paths, int(holdout.get("docs", 1)),
+                                                         int(holdout.get("seed", 0)))
+        else:
+            tr, va = make("train"), make("val")
         if src.get("weight", 1.0) > 0:
-            train.append(make("train"))
+            train.append(tr)
             weights.append(float(src.get("weight", 1.0)))
             names.append(name)
-        val[name] = make("val")
+        val[name] = va
         test[name] = make("test")
     return WeightedConcat(train, weights, names), val, test
 

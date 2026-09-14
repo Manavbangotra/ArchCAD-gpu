@@ -75,6 +75,18 @@ def main():
         batch = collate([fp_item, us_item])
         check(batch["source_ids"].tolist() == [0, 1], "mixed batch keeps per-drawing source ids")
 
+        from data.multisource import holdout_docs
+        files = [f"doc{d}_p{p:04d}_w000.json" for d in range(5) for p in range(1, 4)]
+        tr_f, va_f = holdout_docs(files, 2)
+        docs = lambda fs: {f.split("_p")[0] for f in fs}   # noqa: E731
+        check(len(docs(va_f)) == 2 and not docs(tr_f) & docs(va_f) and len(tr_f) + len(va_f) == 15,
+              "holdout by whole documents")
+        us_dir = us
+        args2 = dict(args, sources=[dict(name="us", root_dir=us_dir, weight=1.0, val_from_train=dict(docs=1))])
+        s2, _ = build(args2)
+        check(len(s2.train) + len(s2.val["us"]) == 20 and len(s2.val["us"]) > 0 and s2.val["us"].split == "val"
+              and len(s2.test["us"]) == 3, f"val_from_train: {len(s2.train)} train, {len(s2.val['us'])} val")
+
         fake = types.SimpleNamespace(train_dataset=train, args=types.SimpleNamespace(seed=3))
         sampler = VecFormerTrainer._get_train_sampler(fake)
         draws = []

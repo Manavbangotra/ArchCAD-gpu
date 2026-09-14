@@ -72,6 +72,14 @@ def main():
               f"text augmented together with lines: text {it2.text_pos[0].tolist()} centre {c0.tolist()}")
         check(abs(float(it2.text_pos[0, 0]) - 0.45) < 1e-4, f"flip and scale applied to text: {it2.text_pos[0, 0].item():.3f} (expect 0.45)")
 
+        g0, g2 = item.text["text_geo"][1], it2.text["text_geo"][1]       # BEDROOM, angle -90, size 3
+        check(torch.allclose(g0, torch.tensor([-1.0, 0.0, 3.0]), atol=1e-4), f"geometry without augmentation: {g0.tolist()}")
+        # horizontal flip mirrors x: a text reading straight up keeps sin, cos stays 0; scale 1.5 grows size
+        check(torch.allclose(g2, torch.tensor([-1.0, 0.0, 4.5]), atol=1e-4), f"geometry follows flip and scale: {g2.tolist()}")
+        g_m = it2.text["text_geo"][0]                                      # M1021, angle 0 -> flipped reads leftwards
+        check(torch.allclose(g_m[:2], torch.tensor([0.0, -1.0]), atol=1e-4), f"flip reverses reading direction: {g_m.tolist()}")
+        check("text_vec" not in item.text and "text_size_ratio" not in item.text, "helper tensors not passed to the model")
+
         batch = FloorPlanCAD.collate_fn([item, it2])
         check(batch["text_types"].shape[0] == 4 and batch["text_cu_seqlens"].tolist() == [0, 2, 4], "collated with offsets")
         check(batch["text_masks"].shape == (4, 4) and batch["text_pos"].shape == (4, 2), "collated shapes")

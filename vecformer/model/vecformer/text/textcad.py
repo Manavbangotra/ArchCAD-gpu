@@ -160,5 +160,5 @@ class MSFTextFusion(nn.Module):
                 att = torch.softmax(logits - penalty * dist2.unsqueeze(0), dim=-1)
                 fused = att @ v                                            # (h, Nb, d)
             fused = fused.transpose(0, 1).reshape(-1, self.attn_dim)       # (Nb, A)
-            out[ln] = self.out(fused)
+            out[ln] = self.out(fused).to(out.dtype)       # autocast: Linear output may be fp16/bf16
         return feat + out, l0_total

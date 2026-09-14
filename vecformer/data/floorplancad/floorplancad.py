@@ -11,7 +11,7 @@ from .dataclass_define import (
     VecData,
     VecDataTransformArgs
 )
-from .text_features import encode_texts
+from .text_features import encode_texts, geometry_after_transform
 from .layer_names import layer_token_table
 from .transform_utils import (
     to_tensor,
@@ -121,16 +121,17 @@ class FloorPlanCAD(Dataset):
         # transform all line coords from [N * [x1, y1, x2, y2]] to [N * 2 * [x, y]] for easier processing
         if svg_data_tensor.coords.shape[-1] == 4:
             svg_data_tensor.coords = svg_data_tensor.coords.reshape(-1, 2, 2)
-        # Text positions ride along as zero-length lines, so normalisation and every
-        # random flip / rotation / scale / translation hits them exactly as it hits
-        # the geometry; they are split off again before features are computed.
+        # Text rides along as short lines from each anchor along its reading direction,
+        # so normalisation and every random flip / rotation / scale / translation hits
+        # position, angle and size exactly as it hits the geometry; they are split off
+        # again (and angle/size recomputed) before line features are computed.
         text, n_lines = None, svg_data_tensor.coords.shape[0]
         if self.use_text and svg_data_tensor.coords.dim() == 3:
             encoded = encode_texts(data.texts, data.viewBox, self.max_texts)
             if encoded is not None:
                 text, text_pos = encoded
                 svg_data_tensor.coords = torch.cat(
-                    [svg_data_tensor.coords, text_pos.unsqueeze(1).repeat(1, 2, 1)], dim=0)
+                    [svg_data_tensor.coords, torch.stack([text_pos, text_pos + text.pop("text_vec")], dim=1)], dim=0)
         # ---------------- normalize lines --------------- #
         svg_data_tensor.coords = norm_coords(
             coords=svg_data_tensor.coords,
@@ -146,6 +147,8 @@ class FloorPlanCAD(Dataset):
         text_pos = None
         if text is not None:
             text_pos = svg_data_tensor.coords[n_lines:, 0, :].clone()
+            vec = svg_data_tensor.coords[n_lines:, 1, :] - text_pos
+            text["text_geo"] = geometry_after_transform(vec, text.pop("text_size_ratio"))
             svg_data_tensor.coords = svg_data_tensor.coords[:n_lines]
         # ------------ transform to line data ------------ #
         # transform all line coords back to [N * [x1, y1, x2, y2]]

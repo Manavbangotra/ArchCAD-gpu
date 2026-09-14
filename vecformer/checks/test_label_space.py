@@ -138,6 +138,23 @@ def model_pass():
     head = [p.grad for n, p in model.named_parameters() if "cad_decoder" in n and p.grad is not None]
     check(head and all(bool(torch.isfinite(g).all()) for g in head), "finite gradients in the decoder")
 
+    # a correct fine prediction on a coarse target of an unannotated family counts as a hit
+    n = 6
+    mask = torch.zeros(n, dtype=torch.bool)
+    mask[:5] = True
+    preds = dict(pred_masks=[mask[None]], pred_labels=[torch.tensor([21])],
+                 pred_sem_segs=[torch.tensor([21] * 5 + [C])])
+    tg = dict(target_masks=[mask[None]], target_labels=[torch.tensor([FIX], dtype=torch.int32)],
+              prim_lens=[torch.ones(n)], sem_labels=[torch.tensor([FIX] * 5 + [C])])
+    p2, t2 = model.resolve_eval_labels(preds, tg, [US])
+    check(p2["pred_labels"][0].tolist() == [21] and t2["target_labels"][0].tolist() == [21],
+          f"toilet on a US fixture-any object is kept and matched: {p2['pred_labels'][0].tolist()} vs {t2['target_labels'][0].tolist()}")
+    ms_hit = model.evaluator(p2, t2)[0]
+    check(int(ms_hit["tp_per_class"][21]) == 1 and int(ms_hit["fn_per_class"][21]) == 0, "evaluator scores it a true positive")
+    preds_far = dict(preds, pred_masks=[torch.tensor([[False] * 4 + [True, True]])])
+    p3, _ = model.resolve_eval_labels(preds_far, tg, [US])
+    check(p3["pred_labels"][0].numel() == 0, "an unannotated-class prediction away from any coarse target is still dropped")
+
     model.eval()
     with torch.no_grad():
         ev = model(**batch)

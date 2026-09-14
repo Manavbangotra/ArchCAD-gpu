@@ -27,7 +27,7 @@ dataset_args:
         - name: us
           root_dir: ../dataset/us_plans/lines
           weight: 0.45
-          splits: {val: test}
+          val_from_train: {docs: 3, seed: 0}    # model selection on held-out projects; test only for reporting
         - name: cubicasa
           root_dir: ../dataset/cubicasa5k/lines_arch43
           weight: 0.2
