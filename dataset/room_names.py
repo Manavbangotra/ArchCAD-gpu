@@ -58,7 +58,7 @@ _GROUP_TOKENS = [
     (STORAGE, {"CLOSET", "CLOSETS", "CLO", "CLOS", "CL", "WIC", "WALKIN", "STORAGE",
                "STOR", "STO", "LAUNDRY", "LAUN", "LNDRY", "WD", "UTILITY", "UTIL",
                "MECH", "MECHANICAL", "LINEN", "LIN"}),
-    (BEDROOM, {"BEDROOM", "BEDROOMS", "BDRM", "BDR", "BR", "BED", "MASTER", "MSTR",
+    (BEDROOM, {"BEDROOM", "BEDROOMS", "BDRM", "BEDRM", "BDR", "BR", "BED", "MASTER", "MSTR",
                "SUITE", "NURSERY", "GUEST"}),
     (LIVING, {"LIVING", "LIV", "FAMILY", "FAM", "GREAT", "DINING", "DIN", "DEN",
               "LOUNGE", "SITTING", "PARLOR", "BREAKFAST", "NOOK"}),
