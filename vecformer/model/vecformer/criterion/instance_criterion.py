@@ -28,6 +28,7 @@ class SparseMatcher:
         ):
         self.topk = topk
         self.inf = 1e8
+        self.label_space = None     # set by InstanceCriterion
         self.class_cost_weight = class_cost_weight
         self.bce_cost_weight = bce_cost_weight
         self.dice_cost_weight = dice_cost_weight
@@ -110,6 +111,10 @@ class SparseMatcher:
             `class_cost` (`torch.Tensor`, shape is (n_queries, n_targets)): Class cost
         """
         class_probs = query_labels.softmax(-1)
+        if self.label_space is not None and bool((target_labels >= query_labels.shape[-1]).any()):
+            # a coarse target costs 1 - (summed probability of its members)
+            rows = self.label_space.target_rows(target_labels).float()
+            return 1 - class_probs.float() @ rows.T
         class_cost = 1 - class_probs[:, target_labels]
         return class_cost
 
@@ -220,6 +225,14 @@ class InstanceCriterion(nn.Module):
             bce_cost_weight=bce_loss_weight,
             dice_cost_weight=dice_loss_weight
         )
+
+    @property
+    def label_space(self):
+        return self.matcher.label_space
+
+    @label_space.setter
+    def label_space(self, value):
+        self.matcher.label_space = value
 
     def forward(self, preds, targets):
         """
@@ -382,6 +395,17 @@ class InstanceCriterion(nn.Module):
         }
 
     def _get_class_loss(self, query_labels, target_labels):
+        ls = self.label_space
+        if ls is not None and bool((target_labels > self.num_instance_classes).any()):
+            # coarse targets: label-smoothed marginal cross-entropy, weighted like
+            # F.cross_entropy(weight=...) (non-object weight for the no-object target)
+            rows = ls.target_rows(target_labels)
+            nll = ls.marginal_nll(query_labels, rows)
+            smooth = -torch.log_softmax(query_labels.float(), dim=-1).mean(-1)
+            per = (1 - self.label_smoothing) * nll + self.label_smoothing * smooth
+            w = torch.ones_like(per)
+            w[target_labels == self.num_instance_classes] = self.ce_non_object_weight
+            return ((per * w).sum() / w.sum().clamp(min=1e-6)).to(query_labels.dtype)
         loss = F.cross_entropy(
             query_labels,
             target_labels.long(),

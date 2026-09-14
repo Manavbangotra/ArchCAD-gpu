@@ -14,6 +14,7 @@ from .configuration_vecformer import VecFormerConfig
 from .point_transformer_v3 import PointTransformerV3
 from .cad_decoder import CADDecoder
 from .criterion import Criterion
+from .criterion.label_space import LabelSpace
 from .modules import FusionLayerFeatsModule
 from .evaluator import Evaluator, EvaluatorConfig
 from .text import TACE, MSFTextFusion, TextContext
@@ -126,9 +127,11 @@ class VecFormer(PreTrainedModel):
                 level: MSFTextFusion(self._stage_channels(level), text_cfg["dim"], text_cfg["heads"], knn=text_cfg["knn"])
                 for level in text_cfg["levels"]})
 
+        self.label_space = LabelSpace.build(config.label_space, config.num_semantic_classes, config.sources)
         self.criterion = Criterion(
             instance_criterion_config=config.instance_criterion_config,
             semantic_criterion_config=config.semantic_criterion_config,
+            label_space=self.label_space,
         )
 
         self.evaluator = Evaluator(EvaluatorConfig(**config.evaluator_config))
@@ -155,7 +158,7 @@ class VecFormer(PreTrainedModel):
         self.is_inference_mode = is_inference_mode
 
     @torch.no_grad()
-    def prepare_targets(self, semantic_id, instance_id, primitive_length, cu_numprims):
+    def prepare_targets(self, semantic_id, instance_id, primitive_length, cu_numprims, source_ids=None):
         """
         Prepare the targets for the model
 
@@ -223,6 +226,12 @@ class VecFormer(PreTrainedModel):
                 & (unique_sem_inst_pairs[:, 1] == -1)
             )  # remove background
             unique_sem_inst_pairs = unique_sem_inst_pairs[valid_mask]
+            if self.label_space is not None:
+                # only fine classes and coarse ids with members are objects; background
+                # (whatever its instance id), ignore and unknown ids are not
+                keep = torch.tensor([self.label_space.is_instance_target(int(p)) for p in unique_sem_inst_pairs[:, 0]],
+                                    dtype=torch.bool, device=unique_sem_inst_pairs.device)
+                unique_sem_inst_pairs = unique_sem_inst_pairs[keep]
 
             target_inst_labels = []
             target_inst_masks = []
@@ -270,12 +279,50 @@ class VecFormer(PreTrainedModel):
             list_target_panop_labels.append(target_panop_labels)
             list_target_panop_masks.append(target_panop_masks)
 
-        return dict(list_target_inst_labels=list_target_inst_labels,
+        n_batch = len(cu_numprims) - 1
+        list_target_sources = source_ids.tolist() if source_ids is not None else [-1] * n_batch
+        return dict(list_target_sources=list_target_sources,
+                    list_target_inst_labels=list_target_inst_labels,
                     list_target_inst_masks=list_target_inst_masks,
                     list_target_prim_lens=list_target_prim_lens,
                     list_target_sem_labels=list_target_sem_labels,
                     list_target_panop_labels=list_target_panop_labels,
                     list_target_panop_masks=list_target_panop_masks)
+
+    @torch.no_grad()
+    def resolve_eval_labels(self, preds, targets, sources):
+        """Make partially and coarsely labelled drawings scoreable (label_space.py).
+
+        - A coarse target (fixture-any) takes the predicted class when it is a member:
+          per primitive for semantics, by the majority predicted class over its mask
+          for panoptic instances.
+        - Ignore and unknown ids score as background.
+        - A prediction of a class this drawing's source does not annotate cannot be
+          judged: such instances are dropped, and such semantic predictions on
+          background primitives count as background.
+        """
+        ls, C = self.label_space, self.num_semantic_classes
+        out_p = dict(pred_masks=[], pred_labels=[], pred_sem_segs=[])
+        out_t = dict(targets, target_labels=[], sem_labels=[])
+        for b in range(len(targets["sem_labels"])):
+            pred_sem = preds["pred_sem_segs"][b]
+            sem = ls.resolve(targets["sem_labels"][b], pred_sem)
+            labels, masks = targets["target_labels"][b], targets["target_masks"][b]
+            if labels.numel() and bool((labels > C).any()):
+                majority = torch.stack([
+                    torch.mode(pred_sem[m]).values if m.any() else pred_sem.new_tensor(C) for m in masks])
+                labels = ls.resolve(labels, majority).to(labels.dtype)
+            ann = ls.annotated_classes(sources[b] if b < len(sources) else -1).to(pred_sem.device)
+            p_lab, p_mask = preds["pred_labels"][b], preds["pred_masks"][b]
+            keep = ann[p_lab.long().clamp(0, C)]
+            unjudged = ~ann[pred_sem.long().clamp(0, C)] & (sem == C)
+            pred_sem = torch.where(unjudged, torch.full_like(pred_sem, C), pred_sem)
+            out_p["pred_masks"].append(p_mask[keep])
+            out_p["pred_labels"].append(p_lab[keep])
+            out_p["pred_sem_segs"].append(pred_sem)
+            out_t["target_labels"].append(labels)
+            out_t["sem_labels"].append(sem.to(targets["sem_labels"][b].dtype))
+        return out_p, out_t
 
     @torch.no_grad()
     def predict(self, list_pred_sem_labels, list_pred_inst_masks, list_pred_inst_labels, list_pred_inst_scores, prim_lengths):
@@ -661,11 +708,12 @@ class VecFormer(PreTrainedModel):
                 text_masks=None,
                 text_geo=None,
                 text_pos=None,
-                text_cu_seqlens=None):
+                text_cu_seqlens=None,
+                source_ids=None):
         # prepare targets
         targets = None
         if sem_ids is not None and inst_ids is not None and prim_lengths is not None and cu_numprims is not None:
-            targets = self.prepare_targets(sem_ids, inst_ids, prim_lengths, cu_numprims)
+            targets = self.prepare_targets(sem_ids, inst_ids, prim_lengths, cu_numprims, source_ids)
         # vecformer backbone forward
         data_dict = self._get_data_dict(coords, feats, cu_seqlens, grid_size=0.01, prim_ids=prim_ids, layer_ids=layer_ids, sample_mode=self.config.sample_mode)
         fusion_layer_ids = self.prepare_primitive_layerid(prim_ids, layer_ids, cu_seqlens)
@@ -715,11 +763,14 @@ class VecFormer(PreTrainedModel):
                 pred_masks=dict_pred_panop_segs["list_pred_masks"],
                 pred_labels=dict_pred_panop_segs["list_pred_labels"],
                 pred_sem_segs=dict_pred_sem_segs["list_pred_labels"])
+            sources = targets["list_target_sources"]
             targets = dict(
                 target_masks=targets["list_target_panop_masks"],
                 target_labels=targets["list_target_panop_labels"],
                 prim_lens=targets["list_target_prim_lens"],
                 sem_labels=targets["list_target_sem_labels"])
+            if self.label_space is not None:
+                preds, targets = self.resolve_eval_labels(preds, targets, sources)
             metric_states, f1_states = self.evaluator(preds, targets)
             if self.config.whether_output_instance:
                 self.evaluator.eval_instance_quality(preds, data_paths)

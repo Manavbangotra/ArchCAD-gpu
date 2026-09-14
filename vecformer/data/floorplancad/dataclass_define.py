@@ -79,6 +79,7 @@ class VecData:
     # T annotations; see data/floorplancad/text_features.py. None when text is off.
     text: Optional[dict] = None       # text_types (T,), text_attrs (T,3), text_grades (T,), text_masks (T,4), text_geo (T,3)
     text_pos: Optional[torch.Tensor] = None   # (T, 2), normalised and augmented with the lines
+    source_id: int = -1                        # joint training: index into the model config's sources
 
 
 @dataclass

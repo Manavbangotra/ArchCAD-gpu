@@ -8,10 +8,13 @@ from .semantic_criterion import SemanticCriterion
 class Criterion(nn.Module):
     def __init__(self,
                  instance_criterion_config: dict,
-                 semantic_criterion_config: dict):
+                 semantic_criterion_config: dict,
+                 label_space=None):
         super().__init__()
         self.instance_criterion = InstanceCriterion(**instance_criterion_config)
         self.semantic_criterion = SemanticCriterion(**semantic_criterion_config)
+        self.instance_criterion.label_space = label_space
+        self.semantic_criterion.label_space = label_space
 
     def forward(self, preds, targets):
         """
@@ -69,7 +72,7 @@ class Criterion(nn.Module):
         dict_sublosses.update(inst_loss)
         # Calculate semantic loss
         sem_preds, sem_targets = self._prepare_semantic_preds_targets(preds, targets)
-        sem_loss = self.semantic_criterion(sem_preds, sem_targets)
+        sem_loss = self.semantic_criterion(sem_preds, sem_targets, targets.get("list_target_sources"))
         dict_sublosses.update(sem_loss)
         # calculate total loss
         loss = dict_sublosses['instance_loss'] + dict_sublosses['semantic_loss']

@@ -34,7 +34,9 @@ class SemanticCriterion(nn.Module):
         self.label_smoothing = label_smoothing
         self.use_mean_batch_loss = use_mean_batch_loss
 
-    def forward(self, pred_labels, target_labels):
+    label_space = None      # set by Criterion when the model has a label space
+
+    def forward(self, pred_labels, target_labels, target_sources=None):
         """
         Calculate the semantic loss
 
@@ -54,7 +56,7 @@ class SemanticCriterion(nn.Module):
 
         # get loss
         for block_pred_labels in pred_labels:
-            blocks_losses.append(self._get_loss(block_pred_labels, target_labels))
+            blocks_losses.append(self._get_loss(block_pred_labels, target_labels, target_sources))
 
         # post process
         sem_loss = {}
@@ -68,10 +70,21 @@ class SemanticCriterion(nn.Module):
 
         return sem_loss
 
-    def _get_loss(self, pred_labels, target_labels):
+    def _get_loss(self, pred_labels, target_labels, target_sources=None):
         loss = []
-        for pred_label, target_label in zip(pred_labels, target_labels):
-            loss.append(F.cross_entropy(pred_label, target_label.long()))
+        ls = self.label_space
+        for i, (pred_label, target_label) in enumerate(zip(pred_labels, target_labels)):
+            if ls is None or (ls.plain and bool((target_label <= self.num_semantic_classes).all())):
+                loss.append(F.cross_entropy(pred_label, target_label.long()))
+                continue
+            # marginal cross-entropy over each target's head columns (label_space.py)
+            source = int(target_sources[i]) if target_sources is not None else -1
+            rows = ls.target_rows(target_label, source)
+            valid = rows.any(-1)
+            if valid.any():
+                loss.append(ls.marginal_nll(pred_label[valid], rows[valid]).mean().to(pred_label.dtype))
+            else:
+                loss.append(pred_label.sum() * 0.0)
         loss = torch.stack(loss).mean() if self.use_mean_batch_loss else torch.stack(loss).sum()
         return dict(ce_loss=self.ce_loss_weight * loss)
 

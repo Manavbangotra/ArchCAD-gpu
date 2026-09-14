@@ -26,13 +26,21 @@ class FloorPlanCAD(Dataset):
                  train_transform_args: Dict[str, Any],
                  eval_transform_args: Dict[str, Any],
                  use_text: bool = False,
-                 max_texts: int = 512):
+                 max_texts: int = 512,
+                 source_id: int = -1,
+                 background_remap: list = None):
         self.root_dir = root_dir
         self.split = split
         # Text annotations for the TextCAD-style model. Off by default, which keeps
         # the upstream VecFormer data path unchanged.
         self.use_text = use_text
         self.max_texts = max_texts
+        # Joint training: which source this corpus is (index into the model config's
+        # sources; -1 = not given, and batches carry no source_ids), and an optional
+        # [from, to] background id remap, e.g. [35, 43] to put FloorPlanCAD's
+        # 35-class files into the Arch-43 label space (whose id 35 is a real class).
+        self.source_id = source_id
+        self.background_remap = background_remap
         self.train_transform_args = train_transform_args
         self.eval_transform_args = eval_transform_args
         self.data_dir = os.path.join(root_dir, split)
@@ -52,6 +60,10 @@ class FloorPlanCAD(Dataset):
         vec_data = self._transform(svg_data,
                                    VecDataTransformArgs(**transform_args))
         vec_data.data_path = data_path
+        vec_data.source_id = self.source_id
+        if self.background_remap:
+            src, dst = self.background_remap
+            vec_data.sem_ids = torch.where(vec_data.sem_ids == src, torch.full_like(vec_data.sem_ids, dst), vec_data.sem_ids)
         return vec_data
 
     def _get_transform_args(self) -> Dict[str, Any]:
@@ -168,6 +180,9 @@ class FloorPlanCAD(Dataset):
             # Data paths
             'data_paths': [item.data_path for item in batch]
         }
+
+        if any(item.source_id >= 0 for item in batch):
+            concat_data["source_ids"] = torch.tensor([item.source_id for item in batch], dtype=torch.long)
 
         # Text annotations, only when the dataset was built with use_text. Every
         # drawing contributes zero or more rows; text_cu_seqlens delimits them.

@@ -29,6 +29,12 @@ class VecFormerConfig(PretrainedConfig):
         thing_class_idxs: list[int] = [i for i in range(30)], # thing class idxs
         stuff_class_idxs: list[int] = [30,31,32,33,34], # stuff class idxs
         use_layer_fusion: bool = True, # (`bool`): whether to use layer fusion enhancement
+        # Joint-training label space (criterion/label_space.py): None = upstream losses;
+        # "arch43" = Arch-43 with coarse ids (door-any...) scored as marginals and
+        # per-source annotated classes. `sources` fixes the meaning of a batch's
+        # source_ids (dataset_args source_id); empty = taxonomy.ANNOTATED order.
+        label_space: str = None,
+        sources: list = [],
         query_thr = 0.5, # (`float`): query threshold, used only in training
         max_num_queries = -1, # (`int`): max number of queries, used only in training
         # VecFormer Backbone
@@ -151,6 +157,8 @@ class VecFormerConfig(PretrainedConfig):
         self.thing_class_idxs: list[int] = thing_class_idxs
         self.stuff_class_idxs: list[int] = stuff_class_idxs
         self.use_layer_fusion: bool = use_layer_fusion
+        self.label_space = label_space
+        self.sources = list(sources)
         self.query_thr: float = query_thr
         self.max_num_queries: int = max_num_queries
         self.sample_mode: str = sample_mode
