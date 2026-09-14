@@ -114,7 +114,7 @@ def windows(x0, y0, x1, y1, size, step):
 
 
 def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_fg, max_segments, meta_base,
-                 step_ratio=0.5, keep_idxs=False, max_prims=8000, crop_side=0.75):
+                 step_ratio=0.5, keep_idxs=False, max_prims=8000, crop_side=0.75, crop_depth=None):
     """Windows of one parsed page -> list of (suffix, json dict).
 
     keep_idxs: add "idxs", the page primitive index of each window primitive, for
@@ -150,9 +150,12 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
         gx1, gy1 = arr[idx, 0::2].max(), arr[idx, 1::2].max()
         for wx0, wy0, wx1, wy1 in windows(gx0, gy0, gx1, gy1, size, size * step_ratio):
             window_prims = idx[(cx[idx] >= wx0) & (cx[idx] < wx1) & (cy[idx] >= wy0) & (cy[idx] < wy1)]
-            for crop, inside in dense_crops(window_prims, cx, cy, (wx0, wy0, wx1, wy1), max_prims, side=crop_side):
+            for crop, inside in dense_crops(window_prims, cx, cy, (wx0, wy0, wx1, wy1), max_prims, side=crop_side,
+                                          max_depth=crop_depth or (6 if keep_idxs else 3)):
                 if inside.size == 0 or int((sem[inside] != tx.ARCH_BG).sum()) < min_fg:
                     continue
+                if not keep_idxs and max_prims and inside.size > 2 * max_prims:
+                    continue    # corpus only: a hatch-dense spot no crop can split (0.6% of US records)
                 max_len = size * ratio
                 rec = dict(viewBox=[0.0, 0.0, size, size], coords=[], primitive_ids=[],
                            layer_ids=[], semantic_ids=[], instance_ids=[], primitive_lengths=[], texts=[])

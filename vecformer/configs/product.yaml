@@ -1,8 +1,10 @@
 # Phase 4: product model, joint FloorPlanCAD-V2 + US plan windows + CubiCasa5K in
 # Arch-43, warm-started from the Phase 3 checkpoint (model init_checkpoint).
-# An epoch is the summed corpus size (9533 + 22038 + 4197 = 35,768 -> 2,235 steps at
-# batch 16); samples are drawn by source weight. 150 epochs = 335,250 steps, which
-# gives the US corpus (45%) ~330 passes-worth of samples; decay over the last 20%.
+# An epoch is the summed training size: 9,533 FloorPlanCAD + 26,274 US windows (3
+# projects held out for validation) + 4,197 CubiCasa = 40,004 -> 2,500 steps at batch
+# 16; samples are drawn by source weight. 150 epochs = 375,000 steps, ~100 passes
+# over the US windows (45% of samples) on top of the warm start; decay over the last
+# 20% (75,000); evaluation every 5 epochs (12,500 steps).
 # Evaluation is per source (eval_fpcad_*, eval_us_*, eval_cubicasa_*); the best
 # checkpoint is chosen on US PQ, with the FloorPlanCAD regression checked by hand
 # against the Phase 3 gate (<= 2 PQ).
@@ -23,14 +25,14 @@ learning_rate: 0.0001
 lr_scheduler_type: warmup_stable_decay
 warmup_ratio: 0.05
 lr_scheduler_kwargs:
-    num_decay_steps: 67050
+    num_decay_steps: 75000
     min_lr_ratio: 0.1
 weight_decay: 0.05
 
 # ------------------------- eval ------------------------- #
 batch_eval_metrics: true
 eval_strategy: steps
-eval_steps: 11175
+eval_steps: 12500
 eval_on_start: true
 
 # ------------------------- save ------------------------- #
