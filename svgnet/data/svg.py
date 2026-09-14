@@ -170,7 +170,8 @@ class SVGDataset(Dataset):
     def __init__(self, data_root, split, data_norm, aug, img_size=980,
                  repeat=1, split_path=None, num_classes=NUM_CLASSES, logger=None,
                  use_corrections=True, coarse_policy="bg", source=None, annotated=None,
-                 stuff_classes=None, index_base=0, max_samples=0, file_list=None):
+                 stuff_classes=None, index_base=0, max_samples=0, file_list=None,
+                 max_prims=0):
         self.data_root = data_root
         self.split = split
         self.data_norm = data_norm
@@ -209,6 +210,24 @@ class SVGDataset(Dataset):
                 f"No '*_s2.json' files found under {data_root} (split={split}). "
                 "Run dataset/parse_FpCAD_svg.py first."
             )
+
+        # Drop drawings above `max_prims` primitives. FloorPlanCAD's largest
+        # (14k-19k primitives) produced non-finite losses in fp32 and wrote NaN
+        # into BatchNorm running statistics on the way, silently breaking eval.
+        # Only files big enough to possibly exceed the cap are opened (a
+        # primitive costs well over 50 bytes of JSON), so this stays cheap.
+        if max_prims:
+            kept = []
+            for p in self.data_list:
+                if osp.getsize(p) > 50 * int(max_prims):
+                    with open(p) as f:
+                        if len(json.load(f)["args"]) > int(max_prims):
+                            continue
+                kept.append(p)
+            if logger is not None and len(kept) != len(self.data_list):
+                logger.info(f"  {source or data_root}: dropped {len(self.data_list) - len(kept)} "
+                            f"drawings over {max_prims} primitives")
+            self.data_list = kept
 
         # A fixed, evenly spaced subset -- for per-epoch validation on a sample
         # rather than the full test set. Deterministic, so epochs compare.

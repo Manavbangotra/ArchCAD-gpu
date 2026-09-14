@@ -90,6 +90,13 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
             cosine_lr_after_step(optimizer, cfg.optimizer.lr, epoch - 1, cfg.step_epoch, cfg.epochs)
             # custimized_lr(optimizer, cfg.optimizer.lr, epoch - 1, cfg.step_epoch, cfg.epochs)
 
+        # BatchNorm running statistics update inside the forward pass, so a
+        # forward that goes non-finite corrupts them even when its loss is then
+        # skipped -- and eval, which uses them, silently breaks. Keep a copy to
+        # restore from.
+        bn_buffers = [(b, b.detach().clone()) for m in model.modules()
+                      if isinstance(m, nn.modules.batchnorm._BatchNorm)
+                      for b in (m.running_mean, m.running_var) if b is not None]
         with torch.cuda.amp.autocast(enabled=cfg.fp16):
             try:
                 _, loss, log_vars = model(batch)
@@ -124,7 +131,10 @@ def train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger,
         # makes the Hungarian matching and the loss very noisy. Accumulating
         # over `accumulate_steps` micro-batches restores the effective batch
         # without needing the memory for it.
-        if not torch.isfinite(loss):
+        if not torch.isfinite(loss) or any(not torch.isfinite(b).all() for b, _ in bn_buffers):
+            with torch.no_grad():
+                for b, saved in bn_buffers:
+                    b.copy_(saved)
             # `loss > 0` is False for NaN, so non-finite losses used to be
             # dropped without a trace. Count them; a run where they persist is
             # broken (fp16 overflow in the decoder did exactly this).

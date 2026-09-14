@@ -83,6 +83,9 @@ data:
     data_root: 'dataset/FloorplanCAD/json'
     repeat: 1
     split: "train"
+    # 19 of 9,958 drawings exceed this; the three largest made non-finite
+    # losses and NaN BatchNorm statistics even in fp32.
+    max_prims: 12000
     # Explicit: svgnet/data/svg.py defaults num_classes to 35 when the
     # key is absent, which would make every id above 35 read as
     # background -- silently, since nothing validates it.

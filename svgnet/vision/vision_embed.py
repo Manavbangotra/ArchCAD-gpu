@@ -83,6 +83,20 @@ class ImgEmbed(nn.Module):
         # parameters still train.
         self.freeze_bn = bool(getattr(cfg.vision, "freeze_bn", True))
 
+        # Frozen backbone weights too (default on). With BatchNorm frozen at
+        # batch size 1, nothing renormalises HRNet's activations, and training
+        # its convolutions at lr 1e-4 drove them from ~0.4 to ~1e21 within one
+        # FloorPlanCAD epoch; the largest drawings then overflowed the fusion
+        # layer's BatchNorm variance to inf, which broke evaluation for all.
+        # The pretrained features stay as they are; the bottleneck and
+        # everything after it learn. No backward through HRNet also saves time
+        # and memory.
+        self.freeze_backbone = bool(getattr(cfg.vision, "freeze_backbone", True))
+        if self.freeze_backbone:
+            self.freeze_bn = True
+            for prm in self.EmbedBackbone.parameters():
+                prm.requires_grad_(False)
+
     def train(self, mode=True):
         super().train(mode)
         if self.freeze_bn:
@@ -97,7 +111,11 @@ class ImgEmbed(nn.Module):
         image = torch.stack(image)
         device, dtype = x_batch[0].device, x_batch[0].dtype
 
-        img_feats_batch = self.EmbedBackbone(image)
+        if self.freeze_backbone:
+            with torch.no_grad():
+                img_feats_batch = self.EmbedBackbone(image)
+        else:
+            img_feats_batch = self.EmbedBackbone(image)
         vert_align_feats_batch = []
         for i, x in enumerate(x_batch):
             img_feats = [f[i:i+1] for f in img_feats_batch]

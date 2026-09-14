@@ -112,6 +112,7 @@ data:
         data_root: dataset/FloorplanCAD/json
         weight: 0.35
         annotated: fpcad
+        max_prims: 12000
       - name: us
         data_root: dataset/us_plans/json5
         file_list: dataset/us_plans/json5/{split}_selected.txt
