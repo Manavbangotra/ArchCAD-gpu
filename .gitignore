@@ -232,3 +232,6 @@ work_dirs/
 # CubiCasa5K download (dataset/cubicasa is a tracked Linux symlink; on Windows it
 # checks out as a text file, so the Windows download lives beside it)
 dataset/cubicasa5k/
+
+# Line-format corpora for vecformer/ (regenerate with dataset/to_lines_*.py)
+dataset/us_plans/lines/
