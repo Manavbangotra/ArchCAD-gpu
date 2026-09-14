@@ -28,6 +28,7 @@ CHECKS = [
     ("takeoff geometry", "takeoff/test_takeoff.py", False),
     ("takeoff drawing roles", "takeoff/test_roles.py", False),
     ("vecformer strict PQ", "vecformer/checks/test_strict_pq.py", True),
+    ("vecformer preprocessor (V1+V2 SVG)", "vecformer/checks/test_preprocess_v2.py", True),
     ("corrections reach the loader", "dataset/test_corrections.py", True),
     ("loader/editor/weights agree", "dataset/test_merge_agreement.py", True),
     ("set loss over target rows", "tools/test_set_loss.py", True),

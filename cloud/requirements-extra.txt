@@ -1,0 +1,11 @@
+# Beyond vecformer/requirements.txt: what the rest of this repository needs on a
+# training machine -- PDF parsing for the US corpus (dataset/parse_pdf_plans.py),
+# text extraction and the takeoff tool (tools/takeoff.py), evaluation helpers.
+pikepdf
+pymupdf
+opencv-python-headless
+munch
+PyYAML
+scipy
+numpy<2
+pillow

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -27,6 +27,10 @@ class SVGData:
     semantic_ids: list[int]
     instance_ids: list[int]
     primitive_lengths: list[float]
+    # Text annotations (FloorPlanCAD-V2 <text> elements), kept for text-aware
+    # models. Each: {"text", "x", "y", "size", "angle", "layer_id"}. Optional, so
+    # JSONs written before this field existed still load.
+    texts: list[dict] = field(default_factory=list)
 
 
 @dataclass

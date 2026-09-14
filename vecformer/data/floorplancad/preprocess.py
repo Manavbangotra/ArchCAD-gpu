@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import math
 import argparse
@@ -190,6 +191,32 @@ def parse_primitive(
     return sampled_coords, prim_width, prim_color, prim_length
 
 
+def _attr(element: ET.Element, name: str, alt: str, default):
+    value = element.attrib.get(name)
+    if value is None:
+        value = element.attrib.get(alt, default)
+    return value
+
+
+_ROTATE = re.compile(r"rotate\(\s*([-+0-9.eE]+)")
+
+
+def parse_text(element: ET.Element, layer_id: int) -> Optional[dict]:
+    """A <text> annotation as {text, x, y, size, angle, layer_id}, or None if empty."""
+    content = " ".join("".join(element.itertext()).split())
+    if not content:
+        return None
+    try:
+        x = float(element.attrib.get("x", 0.0))
+        y = float(element.attrib.get("y", 0.0))
+        size = float(element.attrib.get("font-size", 0.0))
+    except ValueError:
+        return None
+    match = _ROTATE.search(element.attrib.get("transform", ""))
+    angle = float(match.group(1)) if match else 0.0
+    return dict(text=content, x=x, y=y, size=size, angle=angle, layer_id=layer_id)
+
+
 def parse_svg(input_file_path: str, line_t_values: list[float],
               curve_t_values: list[float], connect_lines: bool,
               dynamic_sampling: bool,
@@ -228,6 +255,17 @@ def parse_svg(input_file_path: str, line_t_values: list[float],
         if len(group) == 0:
             continue
         for primitive in group:
+            tag = del_ns(primitive.tag, get_namespace(primitive))
+            # FloorPlanCAD-V2 layers also hold <text> annotations. They are not
+            # geometry: svgpathtools returns no path for them (IndexError in
+            # parse_primitive), so record them for text-aware models instead.
+            if tag == "text":
+                text = parse_text(primitive, layer_id)
+                if text is not None:
+                    svg_data.texts.append(text)
+                continue
+            if tag == "g":
+                continue
             # ------------- sample primitives ------------ #
             sampled_coords, prim_width, prim_color, prim_length = parse_primitive(
                 primitive, line_t_values, curve_t_values, max_length, bbox, connect_lines)
@@ -237,11 +275,14 @@ def parse_svg(input_file_path: str, line_t_values: list[float],
             # In FloorPlanCAD dataset, semanticId starts from 1 to 35, and instanceId starts from 1,
             # instanceId=-1 means uncountable semantic.
             # we define semanticId=36 for background and instanceId=-1 for background/uncountable
-            semantic_id = int(primitive.attrib.get("semanticId", 36))
+            # The original release spells the attributes semanticId/instanceId;
+            # FloorPlanCAD-V2 spells them semantic-id/instance-id. Reading only
+            # the first spelling turns every V2 primitive into background.
+            semantic_id = int(_attr(primitive, "semanticId", "semantic-id", 36))
             if semantic_id == 36: # background semantic
                 instance_id = -1
             else: # valid semantic
-                instance_id = int(primitive.attrib.get("instanceId", -1))
+                instance_id = int(_attr(primitive, "instanceId", "instance-id", -1))
             semantic_id -= 1  # shift id from [1, 36] to [0, 35] for better compatibility
             # ---------------- append data --------------- #
             for coord in sampled_coords:
