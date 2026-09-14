@@ -20,13 +20,16 @@ class ProcessArgs:
 class SVGData:
     viewBox: list[float]
     coords: list[list[float]]
-    colors: list[list[int]]
-    widths: list[float]
     primitive_ids: list[int]
     layer_ids: list[int]
     semantic_ids: list[int]
     instance_ids: list[int]
     primitive_lengths: list[float]
+    # Optional: the US and CubiCasa converters leave out per-segment colours and
+    # widths (constant there, and the model drops colour features anyway), which
+    # keeps a 35k-window corpus several times smaller. Missing = black, width 1.
+    colors: list[list[int]] = field(default_factory=list)
+    widths: list[float] = field(default_factory=list)
     # Text annotations (FloorPlanCAD-V2 <text> elements), kept for text-aware
     # models. Each: {"text", "x", "y", "size", "angle", "layer_id"}. Optional, so
     # JSONs written before this field existed still load.

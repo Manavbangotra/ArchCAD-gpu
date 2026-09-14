@@ -43,12 +43,13 @@ def main():
     texts = [("BATH", (205, 205, 215, 212))]
     wins = U.convert_page(data, texts, lambda x, y: sc, lambda x, y: ("plan", "UNIT A"), 10.0, 0.01, 20, 60000,
                           dict(source="us", doc="t", page=1))
+    check("colors" not in wins[0][1] and "widths" not in wins[0][1], "compact: no per-segment colours/widths")
     check(len(wins) >= 1, f"at least one window: {len(wins)}")
     size = 10000.0 / sc.mm_per_pt
     for _, rec in wins:
         check(abs(rec["viewBox"][2] - size) / size < 1e-5, "window side is 10 m at the page scale")
         segs = rec["coords"]
-        check(max(math.dist(c[:2], c[2:]) for c in segs) <= size * 0.01 + 1e-6, "segments densified to 1%")
+        check(max(math.dist(c[:2], c[2:]) for c in segs) <= size * 0.01 + 0.02, "segments densified to 1% (coords rounded to 0.01)")
         check(len(rec["layer_names"]) == len(set(rec["layer_ids"])), "a name per local layer id")
         check(all(p < len(rec["semantic_ids"]) for p in rec["primitive_ids"]), "primitive ids index labels")
         sem, ins = rec["semantic_ids"], rec["instance_ids"]
@@ -62,7 +63,7 @@ def main():
     check(any(t["text"] == "BATH" for t in first["texts"]), "text inside the window is kept")
     t = next(t for t in first["texts"] if t["text"] == "BATH")
     # window starts at the drawing's lowest y (10), so its top edge is 10 + size
-    check(abs(t["y"] - (10 + first["viewBox"][3] - 208.5)) < 1e-6, "text y flipped to window y-down like the geometry")
+    check(abs(t["y"] - (10 + first["viewBox"][3] - 208.5)) < 0.01, "text y flipped to window y-down like the geometry")
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}):")
         for f in FAILURES:

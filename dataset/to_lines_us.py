@@ -86,7 +86,8 @@ def windows(x0, y0, x1, y1, size, step):
     return [(wx, wy, wx + size, wy + size) for wy in ys for wx in xs]
 
 
-def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_fg, max_segments, meta_base):
+def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_fg, max_segments, meta_base,
+                 step_ratio=0.5):
     """Windows of one parsed page -> list of (suffix, json dict)."""
     import numpy as np
     args = data["args"]
@@ -113,12 +114,12 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
         size = window_m * 1000.0 / mm_per_pt                  # window side in page points
         gx0, gy0 = arr[idx, 0::2].min(), arr[idx, 1::2].min()
         gx1, gy1 = arr[idx, 0::2].max(), arr[idx, 1::2].max()
-        for wx0, wy0, wx1, wy1 in windows(gx0, gy0, gx1, gy1, size, size / 2):
+        for wx0, wy0, wx1, wy1 in windows(gx0, gy0, gx1, gy1, size, size * step_ratio):
             inside = idx[(cx[idx] >= wx0) & (cx[idx] < wx1) & (cy[idx] >= wy0) & (cy[idx] < wy1)]
             if inside.size == 0 or int((sem[inside] != tx.ARCH_BG).sum()) < min_fg:
                 continue
             max_len = size * ratio
-            rec = dict(viewBox=[0.0, 0.0, size, size], coords=[], colors=[], widths=[], primitive_ids=[],
+            rec = dict(viewBox=[0.0, 0.0, size, size], coords=[], primitive_ids=[],
                        layer_ids=[], semantic_ids=[], instance_ids=[], primitive_lengths=[], texts=[])
             local_layers = {}
             local_ins = {}
@@ -128,9 +129,8 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
                     continue
                 lid = local_layers.setdefault(int(layer[i]), len(local_layers))
                 for x0, y0, x1, y1 in segs:
-                    rec["coords"].append([x0 - wx0, wy1 - y0, x1 - wx0, wy1 - y1])   # y down
-                    rec["colors"].append([0, 0, 0])
-                    rec["widths"].append(1.0)
+                    rec["coords"].append([round(x0 - wx0, 2), round(wy1 - y0, 2),       # y down
+                                          round(x1 - wx0, 2), round(wy1 - y1, 2)])
                     rec["primitive_ids"].append(len(rec["semantic_ids"]))
                     rec["layer_ids"].append(lid)
                 c = int(sem[i])
@@ -139,7 +139,7 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
                     rec["instance_ids"].append(-1)
                 else:
                     rec["instance_ids"].append(local_ins.setdefault(int(ins[i]), len(local_ins) + 1))
-                rec["primitive_lengths"].append(sum(math.dist((s[0], s[1]), (s[2], s[3])) for s in segs))
+                rec["primitive_lengths"].append(round(sum(math.dist((s[0], s[1]), (s[2], s[3])) for s in segs), 3))
             if len(rec["coords"]) > max_segments:
                 continue
             rec["layer_names"] = [None] * len(local_layers)
@@ -148,7 +148,7 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
             for text, (tx0, ty0, tx1, ty1) in text_lines:
                 mx, my = (tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0
                 if wx0 <= mx < wx1 and wy0 <= my < wy1:
-                    rec["texts"].append(dict(text=text[:64], x=mx - wx0, y=wy1 - my, size=abs(ty1 - ty0),
+                    rec["texts"].append(dict(text=text[:64], x=round(mx - wx0, 2), y=round(wy1 - my, 2), size=round(abs(ty1 - ty0), 2),
                                              angle=0.0, layer_id=-1))
             wcx, wcy = (wx0 + wx1) / 2.0, (wy0 + wy1) / 2.0
             sc = scale_at(wcx, wcy)
@@ -161,7 +161,7 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
 
 
 def convert_document(job):
-    pdf_path, out_dir, window_m, ratio, min_fg, max_segments, budget, max_page_prims, pages = job
+    pdf_path, out_dir, window_m, ratio, min_fg, max_segments, budget, max_page_prims, pages, step_ratio = job
     import pikepdf
     import pymupdf
     from classify_viewports import boilerplate, nearest_title, page_box, page_titles
@@ -200,9 +200,9 @@ def convert_document(job):
 
             scales = page_scales([(t, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for t, b in lines], words)
             for suffix, rec in convert_page(data, lines, scales.at, viewport_of, window_m, ratio, min_fg,
-                                            max_segments, dict(source="us", doc=stem, page=p)):
+                                            max_segments, dict(source="us", doc=stem, page=p), step_ratio):
                 with open(osp.join(out_dir, f"{stem}_p{p:04d}{suffix}.json"), "w") as f:
-                    json.dump(rec, f)
+                    json.dump(rec, f, separators=(",", ":"))
                 written += 1
     finally:
         pdf.close()
@@ -218,6 +218,9 @@ def main():
     ap.add_argument("--window_m", type=float, default=10.0)
     ap.add_argument("--dynamic_sampling_ratio", type=float, default=0.01)
     ap.add_argument("--min_fg", type=int, default=20, help="labelled primitives a window needs")
+    ap.add_argument("--step_ratio", type=float, default=0.5, help="train windows: step as a fraction of the side")
+    ap.add_argument("--eval_step_ratio", type=float, default=1.0,
+                    help="test windows: 1.0 = no overlap (overlap only adds training variety)")
     ap.add_argument("--max_segments", type=int, default=60000)
     ap.add_argument("--page_time_budget", type=float, default=120.0)
     ap.add_argument("--max_page_prims", type=int, default=800000)
@@ -235,7 +238,8 @@ def main():
         out = osp.join(a.output_dir, side[stem])
         os.makedirs(out, exist_ok=True)
         jobs.append((pdf, out, a.window_m, a.dynamic_sampling_ratio, a.min_fg, a.max_segments,
-                     a.page_time_budget, a.max_page_prims, set(a.pages or [])))
+                     a.page_time_budget, a.max_page_prims, set(a.pages or []),
+                     a.step_ratio if side[stem] == "train" else a.eval_step_ratio))
     print(f"{len(jobs)} documents ({sum(1 for j in jobs if j[1].endswith('train'))} train)", flush=True)
     if a.workers > 1:
         from multiprocessing import Pool

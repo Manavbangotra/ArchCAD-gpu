@@ -166,7 +166,7 @@ def convert(svg_path, label_space="cubicasa12", dynamic_sampling_ratio=0.01):
     box = _svg_box(root)
     max_len = min(box[2], box[3]) * dynamic_sampling_ratio if box else 0.0
 
-    out = dict(viewBox=None, coords=[], colors=[], widths=[], primitive_ids=[], layer_ids=[],
+    out = dict(viewBox=None, coords=[], primitive_ids=[], layer_ids=[],
                semantic_ids=[], instance_ids=[], primitive_lengths=[], texts=[])
     seen = set()
     counters = {"instance": 0, "primitive": 0}
@@ -205,9 +205,7 @@ def convert(svg_path, label_space="cubicasa12", dynamic_sampling_ratio=0.01):
                     for a, b in zip(run, run[1:]):
                         if math.dist(a, b) < 1e-9:
                             continue
-                        out["coords"].append([a[0], a[1], b[0], b[1]])
-                        out["colors"].append([0, 0, 0])
-                        out["widths"].append(1.0)
+                        out["coords"].append([round(a[0], 2), round(a[1], 2), round(b[0], 2), round(b[1], 2)])
                         out["primitive_ids"].append(pid)
                         out["layer_ids"].append(pid)          # no CAD layers: "no prior"
                         length += math.dist(a, b)
@@ -216,12 +214,12 @@ def convert(svg_path, label_space="cubicasa12", dynamic_sampling_ratio=0.01):
                 if length > 0:
                     out["semantic_ids"].append(cls)
                     out["instance_ids"].append(instance if cls != bg and cls not in stuff else -1)
-                    out["primitive_lengths"].append(length)
+                    out["primitive_lengths"].append(round(length, 3))
                     counters["primitive"] += 1
                 else:
                     # every segment was degenerate: drop the rows appended for it
                     while out["primitive_ids"] and out["primitive_ids"][-1] == pid:
-                        for k in ("coords", "colors", "widths", "primitive_ids", "layer_ids"):
+                        for k in ("coords", "primitive_ids", "layer_ids"):
                             out[k].pop()
         for child in el:
             walk(child, ctm, cls, instance)
@@ -243,7 +241,7 @@ def _job(job):
         return src, str(exc)
     os.makedirs(osp.dirname(dst), exist_ok=True)
     with open(dst, "w") as f:
-        json.dump(data, f)
+        json.dump(data, f, separators=(",", ":"))
     return src, None
 
 

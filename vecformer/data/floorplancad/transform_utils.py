@@ -28,11 +28,14 @@ def to_tensor(data: SVGData) -> SVGDataTensor:
         `SVGDataTensor`
     """
     try:
+        n = len(data.coords)
+        colors = data.colors if data.colors else [[0, 0, 0]] * n
+        widths = data.widths if data.widths else [1.0] * n
         return SVGDataTensor(
             viewBox=torch.tensor(data.viewBox, dtype=torch.float32),
             coords=torch.tensor(data.coords, dtype=torch.float32),
-            colors=torch.tensor(data.colors, dtype=torch.int32),
-            widths=torch.tensor(data.widths, dtype=torch.float32),
+            colors=torch.tensor(colors, dtype=torch.int32),
+            widths=torch.tensor(widths, dtype=torch.float32),
             primitive_ids=torch.tensor(data.primitive_ids, dtype=torch.int32),
             layer_ids=torch.tensor(data.layer_ids, dtype=torch.int32),
             semantic_ids=torch.tensor(data.semantic_ids, dtype=torch.int32),
