@@ -1,0 +1,3 @@
+# Scripts run on Linux training machines: keep LF regardless of checkout platform.
+*.sh text eol=lf
+cloud/Dockerfile text eol=lf
