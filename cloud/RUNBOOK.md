@@ -29,6 +29,16 @@ for s in train val test; do echo $s $(ls datasets/FloorPlanCAD-sampled-as-line-j
 FloorPlanCAD-V2 (with text, for the TextCAD stage) is the release under `dataset/FloorplanCAD/` on the
 development machine; the preprocessor now reads its `semantic-id` spelling and keeps `<text>` as `texts`.
 
+### Prepared corpora from the development machine
+The US windows, CubiCasa line JSONs and the FloorPlanCAD-V2 archives are bundled with checksums:
+```bash
+python cloud/pack_data.py --out D:/archcad_cloud_data                          # development machine
+aws s3 sync D:/archcad_cloud_data s3://<bucket>/archcad/data/                  # keys from the environment
+aws s3 sync s3://<bucket>/archcad/data/ cloud_data/ && bash cloud_data/unpack.sh   # GPU machine, repo root
+```
+`unpack.sh` verifies SHA256SUMS and extracts to `dataset/us_plans/lines`, `dataset/cubicasa5k/lines_*` and
+`vecformer/datasets/FloorPlanCAD-V2/{train_1,train_2,test}`.
+
 ## 3. Smoke test (must pass before paying for a long run)
 ```bash
 bash cloud/smoke_test.sh
