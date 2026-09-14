@@ -87,8 +87,12 @@ def windows(x0, y0, x1, y1, size, step):
 
 
 def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_fg, max_segments, meta_base,
-                 step_ratio=0.5):
-    """Windows of one parsed page -> list of (suffix, json dict)."""
+                 step_ratio=0.5, keep_idxs=False):
+    """Windows of one parsed page -> list of (suffix, json dict).
+
+    keep_idxs: add "idxs", the page primitive index of each window primitive, for
+    recombining predictions at takeoff time (takeoff/swa.py); not written to the corpus.
+    """
     import numpy as np
     args = data["args"]
     n = len(args)
@@ -121,6 +125,7 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
             max_len = size * ratio
             rec = dict(viewBox=[0.0, 0.0, size, size], coords=[], primitive_ids=[],
                        layer_ids=[], semantic_ids=[], instance_ids=[], primitive_lengths=[], texts=[])
+            page_idxs = []
             local_layers = {}
             local_ins = {}
             for pid, i in enumerate(inside.tolist()):
@@ -134,6 +139,7 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
                     rec["primitive_ids"].append(len(rec["semantic_ids"]))
                     rec["layer_ids"].append(lid)
                 c = int(sem[i])
+                page_idxs.append(i)
                 rec["semantic_ids"].append(c)
                 if c == tx.ARCH_BG or c in STUFF or ins[i] < 0:
                     rec["instance_ids"].append(-1)
@@ -155,6 +161,8 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
             kind, title = viewport_of(wcx, wcy)
             rec["meta"] = dict(meta_base, window_m=window_m, mm_per_pt=mm_per_pt, scale_source=sc.source,
                                viewport_kind=kind, viewport_title=title)
+            if keep_idxs:
+                rec["idxs"] = page_idxs
             out.append((f"_w{k:03d}", rec))
             k += 1
     return out

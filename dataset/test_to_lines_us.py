@@ -64,6 +64,13 @@ def main():
     t = next(t for t in first["texts"] if t["text"] == "BATH")
     # window starts at the drawing's lowest y (10), so its top edge is 10 + size
     check(abs(t["y"] - (10 + first["viewBox"][3] - 208.5)) < 0.01, "text y flipped to window y-down like the geometry")
+    kept = U.convert_page(data, texts, lambda x, y: sc, lambda x, y: ("plan", "UNIT A"), 10.0, 0.01, 20, 60000,
+                          dict(source="us", doc="t", page=1), keep_idxs=True)
+    check("idxs" not in first, "page indices only on request")
+    for _, rec in kept:
+        idxs = rec["idxs"]
+        check(len(idxs) == len(rec["semantic_ids"]) and
+              [data["semanticIds"][i] for i in idxs] == rec["semantic_ids"], "idxs map window primitives to page primitives")
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}):")
         for f in FAILURES:

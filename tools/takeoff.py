@@ -5,6 +5,9 @@
     python tools/takeoff.py --pdf plans.pdf --config configs/svg/svg_pointT_joint43_3060.yaml \
         --checkpoint work_dirs/joint43/best.pth --out plans.takeoff.json
 
+    # with the line model (VecFormer/TextCAD) over 10 m sliding windows
+    python tools/takeoff.py --pdf plans.pdf --labels vecformer         --model_config vecformer/configs/model/product_arch43.yaml         --checkpoint vecformer/outputs/product/checkpoint-best --out plans.takeoff.json
+
     # without one: the CAD layers' own labels (a baseline, and a pipeline check)
     python tools/takeoff.py --pdf plans.pdf --labels layers --out plans.layers.json
 
@@ -157,8 +160,14 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pdf", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--labels", choices=("model", "layers"), default="model")
+    ap.add_argument("--labels", choices=("model", "layers", "vecformer"), default="model",
+                    help="model: the SVGNet tile model; vecformer: the line model over real-size sliding "
+                         "windows (takeoff/vecformer_model.py); layers: CAD-layer labels, no model")
     ap.add_argument("--config")
+    ap.add_argument("--model_config", help="vecformer model YAML, e.g. vecformer/configs/model/product_arch43.yaml")
+    ap.add_argument("--window_m", type=float, default=10.0, help="vecformer window side in metres")
+    ap.add_argument("--cpu_kernels", action="store_true",
+                    help="vecformer without flash-attn/spconv (pure torch; slow, for machines without CUDA)")
     ap.add_argument("--checkpoint")
     ap.add_argument("--pages", default="", help="e.g. 3-5,9 (1-based); default all")
     ap.add_argument("--schedules", help="Schedule-detection planset JSON for this PDF")
@@ -182,6 +191,12 @@ def main():
             ap.error("--labels model needs --config and --checkpoint (or use --labels layers)")
         model = TileModel(a.config, a.checkpoint, a.device)
         model_info.update(config=a.config, checkpoint=a.checkpoint)
+    elif a.labels == "vecformer":
+        if not (a.model_config and a.checkpoint):
+            ap.error("--labels vecformer needs --model_config and --checkpoint")
+        from takeoff.vecformer_model import WindowModel
+        model = WindowModel(a.model_config, a.checkpoint, a.device, cpu_kernels=a.cpu_kernels)
+        model_info.update(model_config=a.model_config, checkpoint=a.checkpoint, window_m=a.window_m)
     schedule = openings_mod.load_schedule(a.schedules) if a.schedules else None
 
     wanted = set()
@@ -224,6 +239,9 @@ def main():
             if model is None:
                 objects = objects_from_labels(data["semanticIds"], data["instanceIds"], bg_id=43)
                 n_tiles = 0
+            elif a.labels == "vecformer":
+                from takeoff.vecformer_model import page_objects_swa
+                objects, n_tiles = page_objects_swa(data, lines, scales.at, viewport_of, model, window_m=a.window_m)
             else:
                 objects, n_tiles = page_objects(data, a.pdf, i, model, tmp)
 

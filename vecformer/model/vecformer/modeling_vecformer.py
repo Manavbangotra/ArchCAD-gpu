@@ -406,12 +406,17 @@ class VecFormer(PreTrainedModel):
         """
         list_pred_sem_scores = []
         list_pred_sem_labels = []
+        list_pred_sem_probs = []
         for pred_label in pred_labels:
-            pred_score, pred_label = pred_label.softmax(-1).max(-1)
+            probs = pred_label.softmax(-1)
+            pred_score, pred_label = probs.max(-1)
             list_pred_sem_scores.append(pred_score)
             list_pred_sem_labels.append(pred_label)
+            list_pred_sem_probs.append(probs)
+        # probabilities too: sliding-window aggregation votes with them (takeoff/swa.py)
         return dict(list_pred_labels=list_pred_sem_labels,
-                    list_pred_scores=list_pred_sem_scores)
+                    list_pred_scores=list_pred_sem_scores,
+                    list_pred_probs=list_pred_sem_probs)
 
     @torch.no_grad()
     def predict_instance(self, pred_masks, pred_labels, pred_scores):
@@ -514,6 +519,7 @@ class VecFormer(PreTrainedModel):
         """
         list_pred_masks = []
         list_pred_labels = []
+        list_pred_scores = []
         for sem_labels, sem_scores, inst_masks, inst_labels, inst_scores, prim_length in zip(
                 sem_segs['list_pred_labels'], sem_segs['list_pred_scores'],
                 inst_segs["list_pred_masks"], inst_segs["list_pred_labels"],
@@ -529,8 +535,11 @@ class VecFormer(PreTrainedModel):
             panop_masks = torch.cat([inst_masks, stuff_masks])
             list_pred_masks.append(panop_masks)
             list_pred_labels.append(panop_labels)
+            # instance scores after voting; stuff segments score 1
+            list_pred_scores.append(torch.cat([inst_scores.float(), inst_scores.new_ones(len(stuff_labels)).float()]))
         return dict(list_pred_masks=list_pred_masks,
-                    list_pred_labels=list_pred_labels)
+                    list_pred_labels=list_pred_labels,
+                    list_pred_scores=list_pred_scores)
 
     @torch.no_grad()
     def convert_sem_labels_to_panop_stuff_segs(self, sem_labels):
@@ -651,7 +660,8 @@ class VecFormer(PreTrainedModel):
             torch.cumsum(query_seq_lens, dim=0, dtype=torch.int32)
         ])
 
-        targets["list_target_selected_idxs"] = list_target_selected_idxs
+        if targets is not None:
+            targets["list_target_selected_idxs"] = list_target_selected_idxs
 
         return torch.cat(queries, dim=0), query_cu_seqlens, targets
 
@@ -749,16 +759,24 @@ class VecFormer(PreTrainedModel):
                 loss = loss + self.config.text_config["l0_weight"] * l0
                 dict_sublosses["text_l0"] = l0.detach()
         # -------------- get vecformer preds ------------- #
-        if targets is not None and not self.training:
+        dict_pred_sem_segs, dict_pred_inst_segs, dict_pred_panop_segs = None, None, None
+        if not self.training and (targets is not None or self.is_inference_mode):
             # get the last layer's outputs
             last_outputs = outputs[-1]
+            if targets is not None:
+                list_prim_lens = targets["list_target_prim_lens"]
+            elif prim_lengths is not None and cu_numprims is not None:
+                list_prim_lens = [prim_lengths[cu_numprims[i]:cu_numprims[i + 1]] for i in range(len(cu_numprims) - 1)]
+            else:
+                list_prim_lens = [feats.new_ones(int(cu_seqlens[i + 1] - cu_seqlens[i])) for i in range(len(cu_seqlens) - 1)]
             dict_pred_sem_segs, dict_pred_inst_segs, dict_pred_panop_segs = self.predict(
                 last_outputs["list_pred_sem_labels"],
                 last_outputs["list_pred_inst_masks"],
                 last_outputs["list_pred_inst_labels"],
                 last_outputs["list_pred_inst_scores"],
-                targets["list_target_prim_lens"]
+                list_prim_lens
             )
+        if targets is not None and not self.training:
             preds = dict(
                 pred_masks=dict_pred_panop_segs["list_pred_masks"],
                 pred_labels=dict_pred_panop_segs["list_pred_labels"],

@@ -49,6 +49,25 @@ class FloorPlanCAD(Dataset):
     def __len__(self):
         return len(self.data_paths)
 
+    @classmethod
+    def for_inference(cls, eval_transform_args: Dict[str, Any], use_text: bool = False, max_texts: int = 512):
+        """A dataset object with no files, whose `item` turns in-memory records (e.g. US
+        plan windows cut at takeoff time) into model inputs exactly as evaluation does."""
+        ds = cls.__new__(cls)
+        ds.root_dir, ds.split, ds.data_dir, ds.data_paths = "", "test", "", []
+        ds.use_text, ds.max_texts = use_text, max_texts
+        ds.source_id, ds.background_remap = -1, None
+        ds.train_transform_args = ds.eval_transform_args = eval_transform_args
+        return ds
+
+    def item(self, record: Dict[str, Any], data_path: str = "") -> VecData:
+        fields = set(SVGData.__dataclass_fields__)
+        svg_data = SVGData(**{k: v for k, v in record.items() if k in fields})
+        vec_data = self._transform(svg_data, VecDataTransformArgs(**self._get_transform_args()))
+        vec_data.data_path = data_path
+        vec_data.source_id = self.source_id
+        return vec_data
+
     def __getitem__(self, idx):
         # ------------- load origin json data ------------ #
         data_path = os.path.join(self.data_dir, self.data_paths[idx])
