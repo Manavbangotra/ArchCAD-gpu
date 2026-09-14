@@ -80,13 +80,15 @@ def _densify(seg, max_len):
              x0 + (x1 - x0) * (i + 1) / n, y0 + (y1 - y0) * (i + 1) / n) for i in range(n)]
 
 
-def dense_crops(inside, cx, cy, box, max_prims, depth=0, max_depth=3):
+def dense_crops(inside, cx, cy, box, max_prims, depth=0, max_depth=3, side=0.75):
     """Split a window's primitives into overlapping crops of at most `max_prims`.
 
     VecFormer's decoder builds query x primitive masks, and at evaluation every
     primitive is a query: a 47k-primitive window needs ~9 GB per mask tensor. A
-    dense window is cut into four crops of 3/4 of its side (neighbours overlap by
-    half), recursively, but every crop keeps the parent window's frame and viewBox,
+    dense window is cut into four crops of `side` of its side (0.75: neighbours
+    overlap by half, for inference, where every symbol must be whole in some crop;
+    the training corpus uses 0.55, since overlap there only multiplies disk and
+    epoch size -- 0.75 made the US corpus 20 GB instead of ~5), recursively, but every crop keeps the parent window's frame and viewBox,
     so symbols stay at the window's real-world scale. On plan set 461 p.66 with the
     cap forced down to 1,500 (1,426 crops) layer objects come back 392 for 381 --
     the extras are layer "instances" longer than a crop's overlap; with 5/8 crops it
@@ -97,12 +99,12 @@ def dense_crops(inside, cx, cy, box, max_prims, depth=0, max_depth=3):
         yield (box if depth else None), inside
         return
     x0, y0, x1, y1 = box
-    sx, sy = (x1 - x0) * 0.75, (y1 - y0) * 0.75
+    sx, sy = (x1 - x0) * side, (y1 - y0) * side
     for bx in (x0, x1 - sx):
         for by in (y0, y1 - sy):
             sel = inside[(cx[inside] >= bx) & (cx[inside] < bx + sx) & (cy[inside] >= by) & (cy[inside] < by + sy)]
             if sel.size:
-                yield from dense_crops(sel, cx, cy, (bx, by, bx + sx, by + sy), max_prims, depth + 1, max_depth)
+                yield from dense_crops(sel, cx, cy, (bx, by, bx + sx, by + sy), max_prims, depth + 1, max_depth, side)
 
 
 def windows(x0, y0, x1, y1, size, step):
@@ -112,7 +114,7 @@ def windows(x0, y0, x1, y1, size, step):
 
 
 def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_fg, max_segments, meta_base,
-                 step_ratio=0.5, keep_idxs=False, max_prims=8000):
+                 step_ratio=0.5, keep_idxs=False, max_prims=8000, crop_side=0.75):
     """Windows of one parsed page -> list of (suffix, json dict).
 
     keep_idxs: add "idxs", the page primitive index of each window primitive, for
@@ -148,7 +150,7 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
         gx1, gy1 = arr[idx, 0::2].max(), arr[idx, 1::2].max()
         for wx0, wy0, wx1, wy1 in windows(gx0, gy0, gx1, gy1, size, size * step_ratio):
             window_prims = idx[(cx[idx] >= wx0) & (cx[idx] < wx1) & (cy[idx] >= wy0) & (cy[idx] < wy1)]
-            for crop, inside in dense_crops(window_prims, cx, cy, (wx0, wy0, wx1, wy1), max_prims):
+            for crop, inside in dense_crops(window_prims, cx, cy, (wx0, wy0, wx1, wy1), max_prims, side=crop_side):
                 if inside.size == 0 or int((sem[inside] != tx.ARCH_BG).sum()) < min_fg:
                     continue
                 max_len = size * ratio
@@ -202,7 +204,7 @@ def convert_page(data, text_lines, scale_at, viewport_of, window_m, ratio, min_f
 
 
 def convert_document(job):
-    pdf_path, out_dir, window_m, ratio, min_fg, max_segments, budget, max_page_prims, pages, step_ratio, max_prims = job
+    pdf_path, out_dir, window_m, ratio, min_fg, max_segments, budget, max_page_prims, pages, step_ratio, max_prims, crop_side = job
     import pikepdf
     import pymupdf
     from classify_viewports import boilerplate, nearest_title, page_box, page_titles
@@ -242,7 +244,7 @@ def convert_document(job):
             scales = page_scales([(t, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for t, b in lines], words)
             for suffix, rec in convert_page(data, lines, scales.at, viewport_of, window_m, ratio, min_fg,
                                             max_segments, dict(source="us", doc=stem, page=p), step_ratio,
-                                            max_prims=max_prims):
+                                            max_prims=max_prims, crop_side=crop_side):
                 with open(osp.join(out_dir, f"{stem}_p{p:04d}{suffix}.json"), "w") as f:
                     json.dump(rec, f, separators=(",", ":"))
                 written += 1
@@ -266,6 +268,7 @@ def main():
     ap.add_argument("--max_segments", type=int, default=60000)
     ap.add_argument("--max_prims", type=int, default=8000,
                     help="split denser windows into overlapping same-frame crops (0 = never)")
+    ap.add_argument("--crop_side", type=float, default=0.55, help="crop side as a fraction of its parent")
     ap.add_argument("--page_time_budget", type=float, default=120.0)
     ap.add_argument("--max_page_prims", type=int, default=800000)
     ap.add_argument("--docs", nargs="*", help="only these document stems")
@@ -283,7 +286,7 @@ def main():
         os.makedirs(out, exist_ok=True)
         jobs.append((pdf, out, a.window_m, a.dynamic_sampling_ratio, a.min_fg, a.max_segments,
                      a.page_time_budget, a.max_page_prims, set(a.pages or []),
-                     a.step_ratio if side[stem] == "train" else a.eval_step_ratio, a.max_prims))
+                     a.step_ratio if side[stem] == "train" else a.eval_step_ratio, a.max_prims, a.crop_side))
     print(f"{len(jobs)} documents ({sum(1 for j in jobs if j[1].endswith('train'))} train)", flush=True)
     if a.workers > 1:
         from multiprocessing import Pool
