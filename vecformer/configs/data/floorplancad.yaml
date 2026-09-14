@@ -1,0 +1,15 @@
+dataset_name: floorplancad
+dataset_args:
+    root_dir: datasets/FloorPlanCAD-sampled-as-line-jsons # 使用线采样
+    train_transform_args:
+        random_vertical_flip: 0.5
+        random_horizontal_flip: 0.5
+        random_rotate: false
+        random_scale: [0.5, 1.5]
+        random_translation: [0.5, 0.5]
+    eval_transform_args:
+        random_vertical_flip: 0.0
+        random_horizontal_flip: 0.0
+        random_rotate: false
+        random_scale: [1.0, 1.0]
+        random_translation: [0.0, 0.0]

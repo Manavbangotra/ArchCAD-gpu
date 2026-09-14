@@ -1,0 +1,20 @@
+# FloorPlanCAD with the augmentation stated in the VecFormer paper (Sec. 4:
+# flips p=0.5, random rotation, scale 0.8-1.2, translation up to 10%). The
+# released configs/data/floorplancad.yaml uses stronger settings (scale
+# 0.5-1.5, translation 0.5, no rotation); which of the two reproduces the
+# published PQ is part of the reproduction run.
+dataset_name: floorplancad
+dataset_args:
+    root_dir: datasets/FloorPlanCAD-sampled-as-line-jsons
+    train_transform_args:
+        random_vertical_flip: 0.5
+        random_horizontal_flip: 0.5
+        random_rotate: true
+        random_scale: [0.8, 1.2]
+        random_translation: [0.1, 0.1]
+    eval_transform_args:
+        random_vertical_flip: 0.0
+        random_horizontal_flip: 0.0
+        random_rotate: false
+        random_scale: [1.0, 1.0]
+        random_translation: [0.0, 0.0]

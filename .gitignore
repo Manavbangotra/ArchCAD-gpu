@@ -141,6 +141,8 @@ data/
 !svgnet/data/**
 !vecformer/data/
 !vecformer/data/**
+!vecformer/configs/data/
+!vecformer/configs/data/**
 !dataset/*.py
 !dataset/*.sh
 

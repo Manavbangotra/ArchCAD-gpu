@@ -110,11 +110,69 @@ class Evaluator:
                             fp_per_class[pred_label] += 1
                 if not found_match:
                     fn_per_class[target_label] += 1
-        return dict(
+        states = dict(
             tp_per_class=tp_per_class,
             fp_per_class=fp_per_class,
             fn_per_class=fn_per_class,
             tp_iou_score_per_class=tp_iou_score_per_class
+        )
+        states.update(self.eval_panoptic_quality_strict(preds, targets, log_prim_lens))
+        return states
+
+    def eval_panoptic_quality_strict(self, preds, targets, log_prim_lens):
+        """
+        Standard (COCO / Kirillov et al.) panoptic quality counts, reported next to
+        the upstream numbers above rather than replacing them.
+
+        The upstream loop only visits predictions that overlap some ground truth at
+        IoU > threshold: a prediction overlapping nothing is never a false positive,
+        and a ground truth whose only IoU > threshold prediction has the wrong class
+        is not a false negative. Standard PQ counts both. With threshold 0.5 a
+        prediction can match at most one same-class ground truth, so no assignment
+        step is needed:
+
+            TP  same class, IoU > threshold
+            FP  every non-ignored prediction that is not a TP
+            FN  every non-ignored ground truth that is not a TP
+
+        IoU is weighted by log(1 + primitive length), as upstream.
+        """
+        device = preds["pred_masks"][0].device
+        tp = torch.zeros(self.num_classes, dtype=torch.int32, device=device)
+        fp = torch.zeros(self.num_classes, dtype=torch.int32, device=device)
+        fn = torch.zeros(self.num_classes, dtype=torch.int32, device=device)
+        tp_iou = torch.zeros(self.num_classes, dtype=torch.float32, device=device)
+        for b in range(len(preds["pred_masks"])):
+            w = log_prim_lens[b].to(torch.float32)
+            p_lab = preds["pred_labels"][b].long()
+            g_lab = targets["target_labels"][b].long()
+            p_keep = p_lab != self.ignore_label
+            g_keep = g_lab != self.ignore_label
+            p_mask = preds["pred_masks"][b][p_keep].to(torch.float32)
+            g_mask = targets["target_masks"][b][g_keep].to(torch.float32)
+            p_lab, g_lab = p_lab[p_keep], g_lab[g_keep]
+            matched_p = torch.zeros(len(p_lab), dtype=torch.bool, device=device)
+            matched_g = torch.zeros(len(g_lab), dtype=torch.bool, device=device)
+            if len(p_lab) and len(g_lab):
+                inter = (p_mask * w) @ g_mask.T                              # (P, G)
+                area_p = p_mask @ w
+                area_g = g_mask @ w
+                iou = inter / (area_p[:, None] + area_g[None, :] - inter + torch.finfo(torch.float32).eps)
+                ok = (iou > self.iou_threshold) & (p_lab[:, None] == g_lab[None, :])
+                pi, gi = torch.nonzero(ok, as_tuple=True)
+                matched_p[pi] = True
+                matched_g[gi] = True
+                tp.index_add_(0, g_lab[gi], torch.ones_like(gi, dtype=torch.int32))
+                tp_iou.index_add_(0, g_lab[gi], iou[pi, gi])
+            if len(p_lab):
+                fp.index_add_(0, p_lab[~matched_p], torch.ones(int((~matched_p).sum()), dtype=torch.int32, device=device))
+            if len(g_lab):
+                fn.index_add_(0, g_lab[~matched_g], torch.ones(int((~matched_g).sum()), dtype=torch.int32, device=device))
+        return dict(
+            strict_tp_per_class=tp,
+            strict_fp_per_class=fp,
+            strict_fn_per_class=fn,
+            strict_tp_iou_score_per_class=tp_iou,
         )
 
     def eval_semantic_quality(self, list_pred_sem_labels, list_target_sem_labels, list_primitive_lens):
@@ -392,13 +450,21 @@ class MetricsComputer:
                 `stuff_RQ` (`float`): Stuff instance quality
                 `class_{id}_PQ` (`float`): Panoptic quality for class `id`
         """
+        metrics = self._panoptic_from_states(prefix="")
+        if "strict_tp_per_class" in self.metric_states:
+            strict = self._panoptic_from_states(prefix="strict_")
+            metrics.update({k: v for k, v in strict.items() if not k.startswith("strict_class_")})
+        self.metric_states.clear()
+        return metrics
+
+    def _panoptic_from_states(self, prefix):
         metric_states = self.metric_states
         thing_class_idxs = self.thing_class_idxs
         stuff_class_idxs = self.stuff_class_idxs
-        tp_per_class = metric_states["tp_per_class"].to(torch.float32)
-        fp_per_class = metric_states["fp_per_class"].to(torch.float32)
-        fn_per_class = metric_states["fn_per_class"].to(torch.float32)
-        tp_iou_score_per_class = metric_states["tp_iou_score_per_class"].to(torch.float32)
+        tp_per_class = metric_states[prefix + "tp_per_class"].to(torch.float32)
+        fp_per_class = metric_states[prefix + "fp_per_class"].to(torch.float32)
+        fn_per_class = metric_states[prefix + "fn_per_class"].to(torch.float32)
+        tp_iou_score_per_class = metric_states[prefix + "tp_iou_score_per_class"].to(torch.float32)
         eps = torch.finfo(torch.float32).eps
 
         def cal_scores(tp, fp, fn, tp_iou_score):
@@ -410,7 +476,7 @@ class MetricsComputer:
         pq_per_class, sq_per_class, rq_per_class = cal_scores(
             tp_per_class, fp_per_class, fn_per_class, tp_iou_score_per_class)
 
-        class_metrics = {f"class_{id+1}_PQ": pq.item()*100 for id, pq in enumerate(pq_per_class)}
+        class_metrics = {f"{prefix}class_{id+1}_PQ": pq.item()*100 for id, pq in enumerate(pq_per_class)}
 
         thing_pq, thing_sq, thing_rq = cal_scores(
             tp_per_class[thing_class_idxs].sum(),
@@ -428,18 +494,16 @@ class MetricsComputer:
                                 fn_per_class.sum(),
                                 tp_iou_score_per_class.sum())
 
-        self.metric_states.clear()
-
         metrics = {
-            "PQ": pq.item()*100,
-            "SQ": sq.item()*100,
-            "RQ": rq.item()*100,
-            "thing_PQ": thing_pq.item()*100,
-            "thing_SQ": thing_sq.item()*100,
-            "thing_RQ": thing_rq.item()*100,
-            "stuff_PQ": stuff_pq.item()*100,
-            "stuff_SQ": stuff_sq.item()*100,
-            "stuff_RQ": stuff_rq.item()*100,
+            prefix + "PQ": pq.item()*100,
+            prefix + "SQ": sq.item()*100,
+            prefix + "RQ": rq.item()*100,
+            prefix + "thing_PQ": thing_pq.item()*100,
+            prefix + "thing_SQ": thing_sq.item()*100,
+            prefix + "thing_RQ": thing_rq.item()*100,
+            prefix + "stuff_PQ": stuff_pq.item()*100,
+            prefix + "stuff_SQ": stuff_sq.item()*100,
+            prefix + "stuff_RQ": stuff_rq.item()*100,
         }
         metrics.update(class_metrics)
 
