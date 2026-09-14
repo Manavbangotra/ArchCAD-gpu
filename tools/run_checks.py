@@ -39,6 +39,7 @@ CHECKS = [
     ("vecformer Arch-43 label space (CPU kernels)", "vecformer/checks/test_label_space.py", True),
     ("vecformer multisource data and sampler", "vecformer/checks/test_multisource.py", True),
     ("vecformer warm start across stages", "vecformer/checks/test_init_checkpoint.py", True),
+    ("vecformer layer-name embedding", "vecformer/checks/test_layer_names.py", True),
     ("takeoff sliding-window aggregation", "takeoff/test_swa.py", True),
     ("takeoff with the window model (CPU kernels)", "takeoff/test_vecformer_takeoff.py", True),
     ("corrections reach the loader", "dataset/test_corrections.py", True),

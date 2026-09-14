@@ -5,6 +5,8 @@ dataset_args:
     source_order: [fpcad, us, cubicasa]
     common:
         use_text: true
+        use_layer_names: true
+        layer_name_dropout: 0.5     # half the training drawings without names: geometry must suffice
         train_transform_args:
             random_vertical_flip: 0.5
             random_horizontal_flip: 0.5

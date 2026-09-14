@@ -119,6 +119,14 @@ class VecFormerConfig(PretrainedConfig):
             knn = 16, # (`int`): nearest annotations per line in MSF cross-attention, 0 = all
             l0_weight = 1e-4, # (`float`): lambda_c on the expected number of open gates
         ),
+        # Layer-name embedding (data/floorplancad/layer_names.py): hashed words of each
+        # CAD layer's name, averaged, projected and added to the line features after the
+        # backbone embedding. Zero-initialised, so it starts as the model without it.
+        layer_name_config: dict = dict(
+            enabled = False, # (`bool`): needs dataset_args use_layer_names: true
+            vocab = 4096, # (`int`): hashed vocabulary size, token 0 = padding
+            dim = 32, # (`int`): embedding width
+        ),
         num_topk_preds: int = 600, # number of topk predictions
         use_obj_normalization: bool = True, # whether to use object normalization
         obj_normalization_thr: float = 0.01, # object normalization threshold
@@ -149,6 +157,7 @@ class VecFormerConfig(PretrainedConfig):
         instance_criterion_config = _merged("instance_criterion_config", instance_criterion_config)
         semantic_criterion_config = _merged("semantic_criterion_config", semantic_criterion_config)
         text_config = _merged("text_config", text_config)
+        layer_name_config = _merged("layer_name_config", layer_name_config)
         evaluator_config = _merged("evaluator_config", evaluator_config)
         metrics_computer_config = _merged("metrics_computer_config", metrics_computer_config)
 
@@ -174,6 +183,7 @@ class VecFormerConfig(PretrainedConfig):
         semantic_criterion_config["num_semantic_classes"] = num_semantic_classes
         self.semantic_criterion_config: dict = semantic_criterion_config
         self.text_config: dict = text_config
+        self.layer_name_config: dict = layer_name_config
         # Predict
         self.num_topk_preds: int = num_topk_preds
         self.use_obj_normalization: bool = use_obj_normalization

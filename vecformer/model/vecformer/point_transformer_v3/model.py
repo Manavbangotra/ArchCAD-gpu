@@ -986,13 +986,19 @@ class PointTransformerV3(PointModule):
         point.sparsify()
 
         point = self.embedding(point)
+        if stage_hook is not None:
+            feat = stage_hook("embedding", point)       # input-order features, before any pooling
+            if feat is not None:
+                point.feat = feat
+                point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(feat)
         if stage_hook is None:
             point = self.enc(point)
             if not self.cls_mode:
                 point = self.dec(point)
         else:
-            # stage_hook(name, point) -> new feat or None, after every stage
-            # ("enc0".."enc4", then "dec3".."dec0"); used for text fusion. An encoder
+            # stage_hook(name, point) -> new feat or None, after the embedding
+            # ("embedding") and every stage ("enc0".."enc4", then "dec3".."dec0");
+            # used for layer names and text fusion. An encoder
             # stage's point is the next stage's pooling parent, so fused features
             # also flow through the skip connections.
             stages = list(self.enc._modules.items())

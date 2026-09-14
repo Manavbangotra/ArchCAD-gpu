@@ -12,6 +12,7 @@ from .dataclass_define import (
     VecDataTransformArgs
 )
 from .text_features import encode_texts
+from .layer_names import layer_token_table
 from .transform_utils import (
     to_tensor,
     norm_coords,
@@ -28,7 +29,9 @@ class FloorPlanCAD(Dataset):
                  use_text: bool = False,
                  max_texts: int = 512,
                  source_id: int = -1,
-                 background_remap: list = None):
+                 background_remap: list = None,
+                 use_layer_names: bool = False,
+                 layer_name_dropout: float = 0.0):
         self.root_dir = root_dir
         self.split = split
         # Text annotations for the TextCAD-style model. Off by default, which keeps
@@ -41,6 +44,12 @@ class FloorPlanCAD(Dataset):
         # 35-class files into the Arch-43 label space (whose id 35 is a real class).
         self.source_id = source_id
         self.background_remap = background_remap
+        # CAD layer names as hashed words (US windows carry layer_names). Training
+        # drops a whole drawing's names with probability layer_name_dropout, so the
+        # model cannot lean on names alone: US labels come from those very names, and
+        # some sheets have no meaningful layers.
+        self.use_layer_names = use_layer_names
+        self.layer_name_dropout = layer_name_dropout
         self.train_transform_args = train_transform_args
         self.eval_transform_args = eval_transform_args
         self.data_dir = os.path.join(root_dir, split)
@@ -50,13 +59,15 @@ class FloorPlanCAD(Dataset):
         return len(self.data_paths)
 
     @classmethod
-    def for_inference(cls, eval_transform_args: Dict[str, Any], use_text: bool = False, max_texts: int = 512):
+    def for_inference(cls, eval_transform_args: Dict[str, Any], use_text: bool = False, max_texts: int = 512,
+                      use_layer_names: bool = False):
         """A dataset object with no files, whose `item` turns in-memory records (e.g. US
         plan windows cut at takeoff time) into model inputs exactly as evaluation does."""
         ds = cls.__new__(cls)
         ds.root_dir, ds.split, ds.data_dir, ds.data_paths = "", "test", "", []
         ds.use_text, ds.max_texts = use_text, max_texts
         ds.source_id, ds.background_remap = -1, None
+        ds.use_layer_names, ds.layer_name_dropout = use_layer_names, 0.0
         ds.train_transform_args = ds.eval_transform_args = eval_transform_args
         return ds
 
@@ -66,7 +77,17 @@ class FloorPlanCAD(Dataset):
         vec_data = self._transform(svg_data, VecDataTransformArgs(**self._get_transform_args()))
         vec_data.data_path = data_path
         vec_data.source_id = self.source_id
+        self._add_layer_tokens(vec_data, svg_data)
         return vec_data
+
+    def _add_layer_tokens(self, vec_data: VecData, svg_data: SVGData) -> None:
+        if not self.use_layer_names:
+            return
+        num_layers = int(vec_data.layer_ids.max().item()) + 1 if vec_data.layer_ids.numel() else 0
+        names = svg_data.layer_names
+        if self.split == "train" and self.layer_name_dropout > 0 and torch.rand(()) < self.layer_name_dropout:
+            names = []
+        vec_data.layer_tokens = layer_token_table(names, num_layers)
 
     def __getitem__(self, idx):
         # ------------- load origin json data ------------ #
@@ -80,6 +101,7 @@ class FloorPlanCAD(Dataset):
                                    VecDataTransformArgs(**transform_args))
         vec_data.data_path = data_path
         vec_data.source_id = self.source_id
+        self._add_layer_tokens(vec_data, svg_data)
         if self.background_remap:
             src, dst = self.background_remap
             vec_data.sem_ids = torch.where(vec_data.sem_ids == src, torch.full_like(vec_data.sem_ids, dst), vec_data.sem_ids)
@@ -199,6 +221,17 @@ class FloorPlanCAD(Dataset):
             # Data paths
             'data_paths': [item.data_path for item in batch]
         }
+
+        if any(item.layer_tokens is not None for item in batch):
+            # one row per (drawing, layer id); layer_token_cu offsets each drawing's rows
+            tables = []
+            for item in batch:
+                n = int(item.layer_ids.max().item()) + 1 if item.layer_ids.numel() else 0
+                t = item.layer_tokens if item.layer_tokens is not None else torch.zeros(n, 4, dtype=torch.long)
+                tables.append(t)
+            concat_data["layer_tokens"] = torch.cat(tables, dim=0)
+            concat_data["layer_token_cu"] = torch.cumsum(
+                torch.tensor([0] + [len(t) for t in tables], dtype=torch.int64), dim=0)
 
         if any(item.source_id >= 0 for item in batch):
             concat_data["source_ids"] = torch.tensor([item.source_id for item in batch], dtype=torch.long)

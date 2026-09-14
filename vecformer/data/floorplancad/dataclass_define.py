@@ -80,6 +80,7 @@ class VecData:
     text: Optional[dict] = None       # text_types (T,), text_attrs (T,3), text_grades (T,), text_masks (T,4), text_geo (T,3)
     text_pos: Optional[torch.Tensor] = None   # (T, 2), normalised and augmented with the lines
     source_id: int = -1                        # joint training: index into the model config's sources
+    layer_tokens: Optional[torch.Tensor] = None   # (L, 4) hashed layer-name words per layer id (layer_names.py)
 
 
 @dataclass

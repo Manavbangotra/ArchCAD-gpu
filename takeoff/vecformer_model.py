@@ -60,7 +60,8 @@ class WindowModel:
         self.num_classes = cfg.num_semantic_classes
         self.stuff_classes = list(cfg.stuff_class_idxs)
         self.batch_size = batch_size
-        self.dataset = FloorPlanCAD.for_inference(EVAL_TRANSFORM, use_text=bool(cfg.text_config["enabled"]))
+        self.dataset = FloorPlanCAD.for_inference(EVAL_TRANSFORM, use_text=bool(cfg.text_config["enabled"]),
+                                                  use_layer_names=bool(cfg.layer_name_config["enabled"]))
         self.collate = FloorPlanCAD.collate_fn
 
     def predict(self, records: List[dict]) -> List[dict]:

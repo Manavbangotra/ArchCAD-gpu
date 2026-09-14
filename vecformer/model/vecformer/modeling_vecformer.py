@@ -119,6 +119,14 @@ class VecFormer(PreTrainedModel):
 
         self.cad_decoder = CADDecoder(**config.cad_decoder_config)
 
+        name_cfg = config.layer_name_config
+        self.use_layer_names = bool(name_cfg["enabled"])
+        if self.use_layer_names:
+            self.layer_name_emb = torch.nn.Embedding(name_cfg["vocab"], name_cfg["dim"], padding_idx=0)
+            self.layer_name_proj = torch.nn.Linear(name_cfg["dim"], config.backbone_config["enc_channels"][0])
+            torch.nn.init.zeros_(self.layer_name_proj.weight)
+            torch.nn.init.zeros_(self.layer_name_proj.bias)
+
         text_cfg = config.text_config
         self.use_text = bool(text_cfg["enabled"])
         if self.use_text:
@@ -153,6 +161,17 @@ class VecFormer(PreTrainedModel):
         batch = torch.repeat_interleave(torch.arange(len(counts), device=counts.device), counts)
         feats = self.tace(text_types.long(), text_attrs, text_grades.long(), text_masks.bool(), text_geo)
         return TextContext(feats=feats, pos=text_pos, batch=batch)
+
+    def _layer_name_feats(self, layer_ids, cu_seqlens, layer_tokens, layer_token_cu):
+        """(N, enc_channels[0]) per line: mean word embedding of its layer's name, projected."""
+        counts = (cu_seqlens[1:] - cu_seqlens[:-1]).long()
+        drawing = torch.repeat_interleave(torch.arange(len(counts), device=counts.device), counts)
+        rows = layer_ids.long() + layer_token_cu[:-1].long()[drawing]
+        tokens = layer_tokens.long()
+        emb = self.layer_name_emb(tokens)                                  # (L, T, d); padding rows are 0
+        present = (tokens > 0).sum(-1, keepdim=True).clamp(min=1)
+        per_layer = emb.sum(1) / present
+        return self.layer_name_proj(per_layer[rows])
 
     def set_inference_mode(self, is_inference_mode: bool=True):
         self.is_inference_mode = is_inference_mode
@@ -719,7 +738,9 @@ class VecFormer(PreTrainedModel):
                 text_geo=None,
                 text_pos=None,
                 text_cu_seqlens=None,
-                source_ids=None):
+                source_ids=None,
+                layer_tokens=None,
+                layer_token_cu=None):
         # prepare targets
         targets = None
         if sem_ids is not None and inst_ids is not None and prim_lengths is not None and cu_numprims is not None:
@@ -728,10 +749,15 @@ class VecFormer(PreTrainedModel):
         data_dict = self._get_data_dict(coords, feats, cu_seqlens, grid_size=0.01, prim_ids=prim_ids, layer_ids=layer_ids, sample_mode=self.config.sample_mode)
         fusion_layer_ids = self.prepare_primitive_layerid(prim_ids, layer_ids, cu_seqlens)
         text = self._text_context(text_types, text_attrs, text_grades, text_masks, text_geo, text_pos, text_cu_seqlens)
+        name_feats = None
+        if self.use_layer_names and layer_tokens is not None and layer_token_cu is not None:
+            name_feats = self._layer_name_feats(layer_ids, cu_seqlens, layer_tokens, layer_token_cu)
         stage_hook, text_l0 = None, []
-        if text is not None:
+        if text is not None or name_feats is not None:
             def stage_hook(name, point):
-                if name not in self.msf:
+                if name == "embedding":
+                    return None if name_feats is None else point.feat + name_feats.to(point.feat.dtype)
+                if text is None or name not in self.msf:
                     return None
                 feat, l0 = self.msf[name](point.feat, point.coord[:, :2], point.batch, text)
                 text_l0.append(l0)

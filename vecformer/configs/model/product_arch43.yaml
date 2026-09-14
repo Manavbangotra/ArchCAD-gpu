@@ -15,3 +15,5 @@ model_args:
         enabled: true
         num_types: 46
         num_grades: 7
+    layer_name_config:
+        enabled: true        # US CAD layer names as hashed words (data use_layer_names)
