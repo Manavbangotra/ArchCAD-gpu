@@ -16,6 +16,7 @@ from .cad_decoder import CADDecoder
 from .criterion import Criterion
 from .modules import FusionLayerFeatsModule
 from .evaluator import Evaluator, EvaluatorConfig
+from .text import TACE, MSFTextFusion, TextContext
 logger = logging.get_logger("transformers")
 
 
@@ -117,12 +118,38 @@ class VecFormer(PreTrainedModel):
 
         self.cad_decoder = CADDecoder(**config.cad_decoder_config)
 
+        text_cfg = config.text_config
+        self.use_text = bool(text_cfg["enabled"])
+        if self.use_text:
+            self.tace = TACE(text_cfg["num_types"], text_cfg["num_grades"], text_cfg["dim"], text_cfg["heads"])
+            self.msf = torch.nn.ModuleDict({
+                level: MSFTextFusion(self._stage_channels(level), text_cfg["dim"], text_cfg["heads"], knn=text_cfg["knn"])
+                for level in text_cfg["levels"]})
+
         self.criterion = Criterion(
             instance_criterion_config=config.instance_criterion_config,
             semantic_criterion_config=config.semantic_criterion_config,
         )
 
         self.evaluator = Evaluator(EvaluatorConfig(**config.evaluator_config))
+
+    def _stage_channels(self, level: str) -> int:
+        """Feature width after a backbone stage: "enc<s>" or "dec<s>"."""
+        cfg = self.config.backbone_config
+        kind, s = level[:3], int(level[3:])
+        if kind == "enc":
+            return cfg["enc_channels"][s]
+        if kind == "dec":
+            return cfg["dec_channels"][s]
+        raise ValueError(f"unknown backbone level {level!r}")
+
+    def _text_context(self, text_types, text_attrs, text_grades, text_masks, text_geo, text_pos, text_cu_seqlens):
+        if not self.use_text or text_types is None or text_cu_seqlens is None:
+            return None
+        counts = (text_cu_seqlens[1:] - text_cu_seqlens[:-1]).long()
+        batch = torch.repeat_interleave(torch.arange(len(counts), device=counts.device), counts)
+        feats = self.tace(text_types.long(), text_attrs, text_grades.long(), text_masks.bool(), text_geo)
+        return TextContext(feats=feats, pos=text_pos, batch=batch)
 
     def set_inference_mode(self, is_inference_mode: bool=True):
         self.is_inference_mode = is_inference_mode
@@ -627,7 +654,14 @@ class VecFormer(PreTrainedModel):
                 inst_ids=None,
                 prim_lengths=None,
                 cu_numprims=None,
-                data_paths=None):
+                data_paths=None,
+                text_types=None,
+                text_attrs=None,
+                text_grades=None,
+                text_masks=None,
+                text_geo=None,
+                text_pos=None,
+                text_cu_seqlens=None):
         # prepare targets
         targets = None
         if sem_ids is not None and inst_ids is not None and prim_lengths is not None and cu_numprims is not None:
@@ -635,7 +669,16 @@ class VecFormer(PreTrainedModel):
         # vecformer backbone forward
         data_dict = self._get_data_dict(coords, feats, cu_seqlens, grid_size=0.01, prim_ids=prim_ids, layer_ids=layer_ids, sample_mode=self.config.sample_mode)
         fusion_layer_ids = self.prepare_primitive_layerid(prim_ids, layer_ids, cu_seqlens)
-        feats, cu_seqlens = self.backbone(data_dict, cu_seqlens, prim_ids)
+        text = self._text_context(text_types, text_attrs, text_grades, text_masks, text_geo, text_pos, text_cu_seqlens)
+        stage_hook, text_l0 = None, []
+        if text is not None:
+            def stage_hook(name, point):
+                if name not in self.msf:
+                    return None
+                feat, l0 = self.msf[name](point.feat, point.coord[:, :2], point.batch, text)
+                text_l0.append(l0)
+                return feat
+        feats, cu_seqlens = self.backbone(data_dict, cu_seqlens, prim_ids, stage_hook=stage_hook)
         feats = self.lfe(feats, cu_seqlens, fusion_layer_ids)
         # init queries
         if self.training:
@@ -652,6 +695,11 @@ class VecFormer(PreTrainedModel):
         if targets is not None and self.training:
             # calculate panoptic symbol spotting loss
             loss, dict_sublosses = self.criterion(outputs, targets)
+            if text_l0:
+                # expected open gates per drawing, summed over levels (TextCAD lambda_c term)
+                l0 = torch.stack(text_l0).sum() / (len(cu_seqlens) - 1)
+                loss = loss + self.config.text_config["l0_weight"] * l0
+                dict_sublosses["text_l0"] = l0.detach()
         # -------------- get vecformer preds ------------- #
         if targets is not None and not self.training:
             # get the last layer's outputs

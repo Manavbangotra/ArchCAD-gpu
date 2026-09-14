@@ -100,8 +100,13 @@ def hard_concrete_gate(log_alpha, training, tau=2.0 / 3.0, gamma=-0.1, zeta=1.1)
 class MSFTextFusion(nn.Module):
     """One MSF level: filter text by relevance to this stage's lines, then fuse it in."""
 
-    def __init__(self, line_dim: int, text_dim: int = 32, heads: int = 4, attn_dim: Optional[int] = None):
+    def __init__(self, line_dim: int, text_dim: int = 32, heads: int = 4, attn_dim: Optional[int] = None,
+                 knn: int = 16):
         super().__init__()
+        # Each line attends to its `knn` nearest annotations (0 = all). The distance
+        # bias already makes far text negligible; this bounds memory at N * knn
+        # instead of N * T (a 60k-segment US window with 500 notes).
+        self.knn = knn
         attn_dim = attn_dim or max(heads * 8, min(line_dim, 128))
         attn_dim -= attn_dim % heads
         self.heads, self.attn_dim = heads, attn_dim
@@ -141,10 +146,19 @@ class MSFTextFusion(nn.Module):
             q = self.q(self.norm(g_feat)).view(-1, h, d).transpose(0, 1)   # (h, Nb, d)
             k = self.k(kv).view(-1, h, d).transpose(0, 1)                  # (h, Tb, d)
             v = self.v(kv).view(-1, h, d).transpose(0, 1)
-            logits = q @ k.transpose(-1, -2) / math.sqrt(d)                # (h, Nb, Tb)
-            dist2 = torch.cdist(g_pos, t_pos).pow(2)                        # coords in [-0.5, 0.5]
-            logits = logits - F.softplus(self.dist_scale).view(h, 1, 1) * 100.0 * dist2.unsqueeze(0)
-            att = torch.softmax(logits, dim=-1)
-            fused = (att @ v).transpose(0, 1).reshape(-1, self.attn_dim)   # (Nb, A)
+            penalty = F.softplus(self.dist_scale).view(h, 1, 1) * 100.0    # coords in [-0.5, 0.5]
+            if self.knn and self.knn < tx.numel():
+                with torch.no_grad():
+                    near = torch.cdist(g_pos, t_pos).topk(self.knn, dim=1, largest=False).indices  # (Nb, k)
+                dist2 = (g_pos.unsqueeze(1) - t_pos[near]).pow(2).sum(-1)  # (Nb, k)
+                logits = (q.unsqueeze(-2) * k[:, near]).sum(-1) / math.sqrt(d)           # (h, Nb, k)
+                att = torch.softmax(logits - penalty * dist2.unsqueeze(0), dim=-1)
+                fused = (att.unsqueeze(-1) * v[:, near]).sum(-2)           # (h, Nb, d)
+            else:
+                dist2 = torch.cdist(g_pos, t_pos).pow(2)
+                logits = q @ k.transpose(-1, -2) / math.sqrt(d)            # (h, Nb, Tb)
+                att = torch.softmax(logits - penalty * dist2.unsqueeze(0), dim=-1)
+                fused = att @ v                                            # (h, Nb, d)
+            fused = fused.transpose(0, 1).reshape(-1, self.attn_dim)       # (Nb, A)
             out[ln] = self.out(fused)
         return feat + out, l0_total

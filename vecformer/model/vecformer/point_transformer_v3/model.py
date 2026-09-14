@@ -973,7 +973,7 @@ class PointTransformerV3(PointModule):
                     )
                 self.dec.add(module=dec, name=f"dec{s}")
 
-    def forward(self, data_dict, cu_seqlens, prim_id_map):
+    def forward(self, data_dict, cu_seqlens, prim_id_map, stage_hook=None):
         """
         A data_dict is a dictionary containing properties of a batched point cloud.
         It should contain the following properties for PTv3:
@@ -986,9 +986,25 @@ class PointTransformerV3(PointModule):
         point.sparsify()
 
         point = self.embedding(point)
-        point = self.enc(point)
-        if not self.cls_mode:
-            point = self.dec(point)
+        if stage_hook is None:
+            point = self.enc(point)
+            if not self.cls_mode:
+                point = self.dec(point)
+        else:
+            # stage_hook(name, point) -> new feat or None, after every stage
+            # ("enc0".."enc4", then "dec3".."dec0"); used for text fusion. An encoder
+            # stage's point is the next stage's pooling parent, so fused features
+            # also flow through the skip connections.
+            stages = list(self.enc._modules.items())
+            if not self.cls_mode:
+                stages += list(self.dec._modules.items())
+            for name, stage in stages:
+                point = stage(point)
+                feat = stage_hook(name, point)
+                if feat is not None:
+                    point.feat = feat
+                    if "sparse_conv_feat" in point.keys():
+                        point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(feat)
         feats = point.feat
         feats, cu_seqlens = self._pooling_feats(feats, cu_seqlens, prim_id_map)
         return feats, cu_seqlens

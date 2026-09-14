@@ -67,6 +67,23 @@ def main():
     o1, _ = msf(feat.detach(), pos, batch, text)
     o2, _ = msf(feat.detach(), pos, batch, text)
     check(torch.allclose(o1, o2), "eval is deterministic")
+    full = tc.MSFTextFusion(line_dim=64, knn=0)
+    sparse = tc.MSFTextFusion(line_dim=64, knn=3)
+    torch.nn.init.normal_(full.out.weight, std=0.1)
+    full.dist_scale.data.fill_(-20.0)                 # no distance falloff, so dropping text must show
+    sparse.load_state_dict(full.state_dict())
+    full.eval(), sparse.eval()
+    with torch.no_grad():
+        near_pos = text.pos.clone()
+        far = tc.TextContext(feats=x.detach(), pos=near_pos, batch=text.batch)
+        o_full, _ = full(feat.detach(), pos, batch, far)
+        o_knn, _ = sparse(feat.detach(), pos, batch, far)
+        big = tc.MSFTextFusion(line_dim=64, knn=50)
+        big.load_state_dict(full.state_dict())
+        o_big, _ = big.eval()(feat.detach(), pos, batch, far)
+    check(torch.allclose(o_full, o_big, atol=1e-5), "knn >= text count equals full attention")
+    check(bool(torch.isfinite(o_knn).all()) and not torch.allclose(o_knn, o_full, atol=1e-6),
+          "knn attention runs and restricts the context")
     empty = tc.TextContext(torch.zeros(0, 32), torch.zeros(0, 2), torch.zeros(0, dtype=torch.long))
     o3, l3 = msf(feat.detach(), pos, batch, empty)
     check(torch.allclose(o3, feat.detach()) and l3.item() == 0, "no text is a no-op")

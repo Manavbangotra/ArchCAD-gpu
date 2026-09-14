@@ -34,6 +34,7 @@ CHECKS = [
     ("vecformer preprocessor (V1+V2 SVG)", "vecformer/checks/test_preprocess_v2.py", True),
     ("vecformer TACE + MSF text fusion", "vecformer/checks/test_textcad.py", True),
     ("vecformer text data path", "vecformer/checks/test_text_data.py", True),
+    ("vecformer model with text fusion (CPU kernels)", "vecformer/checks/test_model_text_cpu.py", True),
     ("corrections reach the loader", "dataset/test_corrections.py", True),
     ("loader/editor/weights agree", "dataset/test_merge_agreement.py", True),
     ("set loss over target rows", "tools/test_set_loss.py", True),

@@ -86,6 +86,18 @@ class VecFormerConfig(PretrainedConfig):
             "label_smoothing": 0.1,
             "use_mean_batch_loss": True,
         }, # semantic loss config
+        # Text (TextCAD TACE + MSF, model/vecformer/text). Off by default, so the
+        # released VecFormer configs and checkpoints are unchanged.
+        text_config: dict = dict(
+            enabled = False, # (`bool`): fuse text annotations (needs dataset_args use_text: true)
+            num_types = 46, # (`int`): len(dataset/text_types.py TYPE_NAMES)
+            num_grades = 7, # (`int`): len(dataset/text_types.py GRADES)
+            dim = 32, # (`int`): TACE width D
+            heads = 4, # (`int`): TACE and MSF heads H
+            levels = ("enc0", "enc1", "enc2", "enc3", "enc4"), # backbone stages with MSF (TextCAD: 5 levels)
+            knn = 16, # (`int`): nearest annotations per line in MSF cross-attention, 0 = all
+            l0_weight = 1e-4, # (`float`): lambda_c on the expected number of open gates
+        ),
         num_topk_preds: int = 600, # number of topk predictions
         use_obj_normalization: bool = True, # whether to use object normalization
         obj_normalization_thr: float = 0.01, # object normalization threshold
@@ -131,6 +143,9 @@ class VecFormerConfig(PretrainedConfig):
         self.instance_criterion_config: dict = instance_criterion_config
         semantic_criterion_config["num_semantic_classes"] = num_semantic_classes
         self.semantic_criterion_config: dict = semantic_criterion_config
+        self.text_config: dict = {**dict(enabled=False, num_types=46, num_grades=7, dim=32, heads=4,
+                                         levels=("enc0", "enc1", "enc2", "enc3", "enc4"), knn=16,
+                                         l0_weight=1e-4), **(text_config or {})}
         # Predict
         self.num_topk_preds: int = num_topk_preds
         self.use_obj_normalization: bool = use_obj_normalization
