@@ -1,7 +1,22 @@
 """
 VecFormer configuration
 """
+import copy
+import inspect
+
 from transformers import PretrainedConfig
+
+
+def _merged(name, value):
+    """A fresh copy of the signature default for dict argument `name`, updated with
+    `value`. Fresh, because __init__ fills class counts into these dicts: mutating
+    the shared defaults made every later VecFormerConfig() (the trainer builds one)
+    rewrite the counts inside an existing model's config. Merged, so a YAML may
+    override single keys (e.g. backbone enc_channels) without restating the rest."""
+    default = inspect.signature(VecFormerConfig.__init__).parameters[name].default
+    out = copy.deepcopy(default)
+    out.update(copy.deepcopy(value) if value else {})
+    return out
 
 
 class VecFormerConfig(PretrainedConfig):
@@ -123,6 +138,13 @@ class VecFormerConfig(PretrainedConfig):
         **kwargs
     ):
         super().__init__(**kwargs)
+        backbone_config = _merged("backbone_config", backbone_config)
+        cad_decoder_config = _merged("cad_decoder_config", cad_decoder_config)
+        instance_criterion_config = _merged("instance_criterion_config", instance_criterion_config)
+        semantic_criterion_config = _merged("semantic_criterion_config", semantic_criterion_config)
+        text_config = _merged("text_config", text_config)
+        evaluator_config = _merged("evaluator_config", evaluator_config)
+        metrics_computer_config = _merged("metrics_computer_config", metrics_computer_config)
 
         self.num_instance_classes: int = num_instance_classes
         self.num_semantic_classes: int = num_semantic_classes
@@ -143,9 +165,7 @@ class VecFormerConfig(PretrainedConfig):
         self.instance_criterion_config: dict = instance_criterion_config
         semantic_criterion_config["num_semantic_classes"] = num_semantic_classes
         self.semantic_criterion_config: dict = semantic_criterion_config
-        self.text_config: dict = {**dict(enabled=False, num_types=46, num_grades=7, dim=32, heads=4,
-                                         levels=("enc0", "enc1", "enc2", "enc3", "enc4"), knn=16,
-                                         l0_weight=1e-4), **(text_config or {})}
+        self.text_config: dict = text_config
         # Predict
         self.num_topk_preds: int = num_topk_preds
         self.use_obj_normalization: bool = use_obj_normalization
@@ -162,6 +182,6 @@ class VecFormerConfig(PretrainedConfig):
         self.evaluator_config: dict = evaluator_config
         # MetricsComputer
         metrics_computer_config["num_classes"] = num_semantic_classes
-        metrics_computer_config["thing_class_idxs"] = thing_class_idxs
-        metrics_computer_config["stuff_class_idxs"] = stuff_class_idxs
+        metrics_computer_config["thing_class_idxs"] = list(thing_class_idxs)
+        metrics_computer_config["stuff_class_idxs"] = list(stuff_class_idxs)
         self.metrics_computer_config: dict = metrics_computer_config

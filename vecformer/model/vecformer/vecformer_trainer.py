@@ -11,8 +11,11 @@ from .evaluator import MetricsComputer, MetricsComputerConfig
 class VecFormerTrainer(Trainer):
 
     def __init__(self, *args, **kwargs):
+        model = kwargs.get("model", args[0] if args else None)
+        # the model's own class counts, not VecFormerConfig() defaults (35 classes)
+        config = model.config if model is not None else VecFormerConfig()
         super().__init__(*args,
-                         compute_metrics=MetricsComputer(MetricsComputerConfig(**VecFormerConfig().metrics_computer_config)),
+                         compute_metrics=MetricsComputer(MetricsComputerConfig(**config.metrics_computer_config)),
                          **kwargs)
         self.label_names = ["sem_ids", "inst_ids", "prim_lengths", "cu_numprims", "data_paths"]
         self.custom_logs: Dict[str, torch.Tensor] = {}
