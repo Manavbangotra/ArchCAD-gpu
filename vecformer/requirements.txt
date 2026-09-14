@@ -1,0 +1,13 @@
+transformers==4.49.0
+accelerate==1.4.0
+datasets==3.3.2
+evaluate==0.4.3
+svgpathtools==1.6.1
+rich==13.9.4
+spconv-cu118==2.3.8
+addict==2.4.0
+timm==1.0.15
+einops==0.8.1
+tensorboardX==2.6.4
+tensorboard==2.20.0
+gdown==5.2.0

@@ -139,6 +139,8 @@ data/
 # release; `dataset/` likewise hid the preprocessing scripts.
 !svgnet/data/
 !svgnet/data/**
+!vecformer/data/
+!vecformer/data/**
 !dataset/*.py
 !dataset/*.sh
 
