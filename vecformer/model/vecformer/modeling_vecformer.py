@@ -784,6 +784,10 @@ class VecFormer(PreTrainedModel):
                 l0 = torch.stack(text_l0).sum() / (len(cu_seqlens) - 1)
                 loss = loss + self.config.text_config["l0_weight"] * l0
                 dict_sublosses["text_l0"] = l0.detach()
+            elif self.use_text:
+                # logged on every step even for a batch without text: the trainer gathers the
+                # sub-loss dict across ranks, and ranks with different keys would not line up
+                dict_sublosses["text_l0"] = loss.detach() * 0.0
         # -------------- get vecformer preds ------------- #
         dict_pred_sem_segs, dict_pred_inst_segs, dict_pred_panop_segs = None, None, None
         if not self.training and (targets is not None or self.is_inference_mode):
