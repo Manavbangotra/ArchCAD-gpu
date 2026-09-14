@@ -22,6 +22,18 @@ class VecFormerTrainer(Trainer):
         self.custom_logs_accumulated_step: Dict[str, int] = {}
         self.custom_logs_is_training: bool = False
 
+    def _get_train_sampler(self, *args, **kwargs):
+        # Joint training (data/multisource): draw each source by its weight, with
+        # replacement. The generator is seeded identically on every rank, so the
+        # distributed batch sharding sees one shared order.
+        weights = getattr(self.train_dataset, "sample_weights", None)
+        if weights is None:
+            return super()._get_train_sampler(*args, **kwargs)
+        generator = torch.Generator()
+        generator.manual_seed(self.args.seed)
+        return torch.utils.data.WeightedRandomSampler(weights, num_samples=len(weights), replacement=True,
+                                                      generator=generator)
+
     def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
         # ----------- hack to log multiple loss ---------- #
         if self.custom_logs_is_training:
