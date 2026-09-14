@@ -1,0 +1,13 @@
+# VecFormer + TextCAD text fusion (TACE + MSF at the five encoder stages).
+# FloorPlanCAD: 35 classes, layer prior on (paper setting with prior).
+model_name: vecformer
+model_args:
+    text_config:
+        enabled: true
+        num_types: 46       # len(dataset/text_types.py TYPE_NAMES)
+        num_grades: 7       # len(dataset/text_types.py GRADES)
+        dim: 32
+        heads: 4
+        levels: [enc0, enc1, enc2, enc3, enc4]
+        knn: 16
+        l0_weight: 0.0001

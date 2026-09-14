@@ -1,0 +1,17 @@
+# Product model: Arch-43 label space (dataset/taxonomy.py) with coarse targets and
+# per-source annotated classes (criterion/label_space.py), text fusion on.
+# init_checkpoint: the Phase 3 best checkpoint directory; the backbone, decoder
+# trunk and text modules load, the 43-class heads start fresh.
+model_name: vecformer
+model_args:
+    init_checkpoint: outputs/textcad/best   # edit to the Phase 3 checkpoint
+    num_semantic_classes: 43
+    num_instance_classes: 43
+    thing_class_idxs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 35, 36, 37, 38, 39, 40, 41, 42]
+    stuff_class_idxs: [30, 31, 32, 33, 34]
+    label_space: arch43
+    sources: [fpcad, us, cubicasa]          # = taxonomy.ANNOTATED order = data source_order
+    text_config:
+        enabled: true
+        num_types: 46
+        num_grades: 7

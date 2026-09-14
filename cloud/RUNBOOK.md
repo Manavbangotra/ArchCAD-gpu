@@ -51,7 +51,38 @@ The default model config has the layer prior on (`use_layer_fusion`, layer id as
 bash scripts/test.sh      # edit the checkpoint path first
 ```
 
-## 5. Checkpoints off the machine
+## 5. Phase 3 - TextCAD reproduction (text fusion)
+Data. FloorPlanCAD-V2 (with `<text>`) is the release under `dataset/FloorplanCAD/` on the development
+machine (train_1, train_2, test; 15,663 SVGs); copy it to `vecformer/datasets/FloorPlanCAD-V2`. CubiCasa
+line JSONs come from `dataset/to_lines_cubicasa.py` (or sync `dataset/cubicasa5k/lines_*` from the
+development machine, 0.9 GB each).
+```bash
+cd vecformer && export PYTHONPATH=$(pwd)
+python data/floorplancad/preprocess.py --input_dir=$(pwd)/datasets/FloorPlanCAD-V2     --output_dir=$(pwd)/datasets/FloorPlanCAD-V2-lines --dynamic_sampling --connect_lines     --max_workers $(nproc) --use_progress_bar
+python data/floorplancad/split_v2.py --input_dir datasets/FloorPlanCAD-V2-lines     --output_dir datasets/FloorPlanCAD-V2-textcad --protocol textcad        # 9533 / 4597 / 1533
+python data/floorplancad/split_v2.py --input_dir datasets/FloorPlanCAD-V2-lines     --output_dir datasets/FloorPlanCAD-V2-official --protocol official      # release train / test
+```
+Runs (8 GPUs each):
+```bash
+torchrun --nproc_per_node=8 launch.py --launch_mode train --config_path configs/textcad.yaml     --model_args_path configs/model/textcad.yaml --data_args_path configs/data/floorplancad_v2_text.yaml     --run_name textcad_fpcad --save_total_limit 5 --output_dir outputs/textcad_fpcad
+torchrun --nproc_per_node=8 launch.py --launch_mode train --config_path configs/textcad_cubicasa.yaml     --model_args_path configs/model/textcad_cubicasa.yaml --data_args_path configs/data/cubicasa_text.yaml     --run_name textcad_cubicasa --save_total_limit 5 --output_dir outputs/textcad_cubicasa
+```
+Logs add `text_l0` (expected open text gates per drawing). Ablation without text: the same command with
+`configs/model/vecformer.yaml`. **Gates:** FloorPlanCAD-V2 PQ >= 91 (paper 92.67), CubiCasa >= 95 (paper
+96.53); report `strict_PQ` next to both.
+
+## 6. Phase 4 - product model (joint, Arch-43)
+Needs the US windows (`dataset/to_lines_us.py`, from the plan-set PDFs; or sync `dataset/us_plans/lines`)
+and CubiCasa in Arch-43 (`--labels arch43`). Set `init_checkpoint` in `configs/model/product_arch43.yaml`
+to the Phase 3 FloorPlanCAD best checkpoint, then:
+```bash
+PYTHONPATH=. python ../cloud/dryrun_joint.py                 # real data through the real model, 2 min
+torchrun --nproc_per_node=8 launch.py --launch_mode train --config_path configs/product.yaml     --model_args_path configs/model/product_arch43.yaml --data_args_path configs/data/product_joint.yaml     --run_name product --save_total_limit 5 --output_dir outputs/product
+```
+Evaluation is per source: `eval_fpcad_PQ`, `eval_us_PQ`, `eval_cubicasa_PQ` (+ strict). Best checkpoint by
+US PQ. **Gate:** FloorPlanCAD PQ within 2 of Phase 3.
+
+## 7. Checkpoints off the machine
 Credentials from the environment only (rotate the keys that were pasted in chat earlier):
 ```bash
 export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=us-east-1

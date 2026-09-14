@@ -1,0 +1,17 @@
+# FloorPlanCAD-V2 with text annotations, TextCAD split (data/floorplancad/split_v2.py).
+dataset_name: floorplancad
+dataset_args:
+    root_dir: datasets/FloorPlanCAD-V2-textcad
+    use_text: true
+    train_transform_args:
+        random_vertical_flip: 0.5
+        random_horizontal_flip: 0.5
+        random_rotate: true
+        random_scale: [0.8, 1.2]
+        random_translation: [0.1, 0.1]
+    eval_transform_args:
+        random_vertical_flip: 0.0
+        random_horizontal_flip: 0.0
+        random_rotate: false
+        random_scale: [1.0, 1.0]
+        random_translation: [0.0, 0.0]

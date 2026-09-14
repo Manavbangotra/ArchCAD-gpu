@@ -1,0 +1,17 @@
+# CubiCasa5K line JSONs, 12-class TextCAD protocol (dataset/to_lines_cubicasa.py --labels cubicasa12).
+dataset_name: floorplancad
+dataset_args:
+    root_dir: ../dataset/cubicasa5k/lines_cubicasa12
+    use_text: true
+    train_transform_args:
+        random_vertical_flip: 0.5
+        random_horizontal_flip: 0.5
+        random_rotate: true
+        random_scale: [0.8, 1.2]
+        random_translation: [0.1, 0.1]
+    eval_transform_args:
+        random_vertical_flip: 0.0
+        random_horizontal_flip: 0.0
+        random_rotate: false
+        random_scale: [1.0, 1.0]
+        random_translation: [0.0, 0.0]

@@ -1,0 +1,13 @@
+# TextCAD on CubiCasa5K: 12 classes (dataset/to_lines_cubicasa.py cubicasa12),
+# stuff = wall 10, railing 11. CubiCasa has no CAD layers (layer id = primitive id),
+# so the layer prior carries no information; kept on to match the architecture.
+model_name: vecformer
+model_args:
+    num_semantic_classes: 12
+    num_instance_classes: 12
+    thing_class_idxs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    stuff_class_idxs: [10, 11]
+    text_config:
+        enabled: true
+        num_types: 46
+        num_grades: 7

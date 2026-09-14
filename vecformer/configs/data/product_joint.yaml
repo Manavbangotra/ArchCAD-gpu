@@ -1,0 +1,31 @@
+# Joint training for the product model (data/multisource). All corpora are Arch-43
+# line JSONs except FloorPlanCAD, whose background id 35 is remapped to 43.
+dataset_name: multisource
+dataset_args:
+    source_order: [fpcad, us, cubicasa]
+    common:
+        use_text: true
+        train_transform_args:
+            random_vertical_flip: 0.5
+            random_horizontal_flip: 0.5
+            random_rotate: true
+            random_scale: [0.8, 1.2]
+            random_translation: [0.1, 0.1]
+        eval_transform_args:
+            random_vertical_flip: 0.0
+            random_horizontal_flip: 0.0
+            random_rotate: false
+            random_scale: [1.0, 1.0]
+            random_translation: [0.0, 0.0]
+    sources:
+        - name: fpcad
+          root_dir: datasets/FloorPlanCAD-V2-textcad
+          weight: 0.35
+          background_remap: [35, 43]
+        - name: us
+          root_dir: ../dataset/us_plans/lines
+          weight: 0.45
+          splits: {val: test}
+        - name: cubicasa
+          root_dir: ../dataset/cubicasa5k/lines_arch43
+          weight: 0.2
