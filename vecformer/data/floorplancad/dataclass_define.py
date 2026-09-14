@@ -31,6 +31,10 @@ class SVGData:
     # models. Each: {"text", "x", "y", "size", "angle", "layer_id"}. Optional, so
     # JSONs written before this field existed still load.
     texts: list[dict] = field(default_factory=list)
+    # US plan windows (dataset/to_lines_us.py): the CAD layer name behind each
+    # layer id, and provenance (source, doc, page, scale, viewport). Optional.
+    layer_names: list = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
 
 
 @dataclass

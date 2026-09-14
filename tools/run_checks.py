@@ -26,6 +26,7 @@ CHECKS = [
     ("room tags parse", "dataset/test_room_names.py", False),
     ("instance clustering", "dataset/test_cluster.py", False),
     ("CubiCasa line converter", "dataset/test_to_lines_cubicasa.py", False),
+    ("US line-window converter", "dataset/test_to_lines_us.py", False),
     ("takeoff geometry", "takeoff/test_takeoff.py", False),
     ("takeoff drawing roles", "takeoff/test_roles.py", False),
     ("vecformer strict PQ", "vecformer/checks/test_strict_pq.py", True),
