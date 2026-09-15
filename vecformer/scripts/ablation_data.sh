@@ -10,6 +10,8 @@
 #   RUNS="A B" bash scripts/ablation_data.sh                      # a subset
 #   MAX_STEPS=20000 RUNS="A B C" bash scripts/ablation_data.sh    # a cheaper trend check
 #   LOCAL=1 RUNS=A bash scripts/ablation_data.sh                  # one 12 GB GPU (Windows ok)
+#   LOCAL=1 SMOKE=1 bash scripts/ablation_data.sh                 # pipeline check: 100 steps, 48 eval windows
+#   EVAL_LIMIT=200 ...                                            # evaluate on the first N val/test windows only
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONPATH=$(pwd):${PYTHONPATH:-}
@@ -27,6 +29,11 @@ if [ -n "${LOCAL:-}" ]; then
 fi
 TRAIN_CFG=$BASE_CFG
 mkdir -p "$OUT"
+if [ -n "${SMOKE:-}" ]; then
+    # pipeline check, not an experiment: few steps, evaluation on a few dozen US windows
+    MAX_STEPS=${MAX_STEPS:-100}
+    EVAL_LIMIT=${EVAL_LIMIT:-48}
+fi
 if [ -n "${MAX_STEPS:-}" ]; then
     # a shorter budget keeps warmup 5%, decay over the last 20% and 8 evaluations
     TRAIN_CFG=$OUT/ablation_data_${MAX_STEPS}.yaml
@@ -51,6 +58,16 @@ done
 for r in $RUNS; do
     data=configs/data/${DATA[$r]}.yaml
     run=$OUT/$r
+    if [ -n "${EVAL_LIMIT:-}" ]; then
+        limited=$OUT/${DATA[$r]}_eval${EVAL_LIMIT}.yaml
+        python - "$data" "$limited" "$EVAL_LIMIT" <<'PY'
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1]))
+cfg["dataset_args"]["limit"] = {"val": int(sys.argv[3]), "test": int(sys.argv[3])}
+yaml.safe_dump(cfg, open(sys.argv[2], "w"), sort_keys=False)
+PY
+        data=$limited
+    fi
     echo "== run $r: $data -> $run"
     python ../cloud/dryrun_joint.py --data "$data" --model "$MODEL_CFG"
     MASTER_PORT=$((29500 + RANDOM % 100)) "${LAUNCH[@]}" launch.py --launch_mode train --config_path "$TRAIN_CFG" --model_args_path "$MODEL_CFG" --data_args_path "$data" --run_name "ablation_$r" --save_total_limit 2 --output_dir "$run" 2>&1 | tee "$OUT/$r.train.log"
