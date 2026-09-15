@@ -23,7 +23,11 @@ class Evaluator:
         self.output_dir = config.output_dir
         
     def __call__(self, preds, targets):
-        return self.eval_panoptic_quality(preds, targets), self.eval_semantic_quality(preds["pred_sem_segs"], targets["sem_labels"], targets["prim_lens"])
+        # metrics in full precision: under bf16/fp16 autocast (Trainer bf16: true) the IoU
+        # matrix products would come out half precision and mismatch the float32 accumulators
+        device_type = preds["pred_masks"][0].device.type if preds["pred_masks"] else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            return self.eval_panoptic_quality(preds, targets), self.eval_semantic_quality(preds["pred_sem_segs"], targets["sem_labels"], targets["prim_lens"])
 
     def eval_panoptic_quality(self, preds, targets):
         """

@@ -22,6 +22,7 @@ CubiCasa5K), each a FloorPlanCAD-format dataset.
               root_dir: ../dataset/cubicasa5k/lines_arch43
               weight: 0.2
               evaluate: false       # train on it, but no val/test set (saves evaluation time)
+        limit: {train: 64, val: 16, test: 16}   # optional: first N files per role (smoke tests)
         source_order: []            # must equal the model config's `sources`; empty = ANNOTATED order
 
 Training draws samples with replacement so each source contributes its `weight`
@@ -110,6 +111,10 @@ def build_sources(dataset_args: dict):
                                                          int(holdout.get("seed", 0)))
         else:
             tr, va = make("train"), make("val")
+        limit = dataset_args.get("limit") or {}
+        for role, ds in (("train", tr), ("val", va)):
+            if ds is not None and limit.get(role):
+                ds.data_paths = ds.data_paths[:int(limit[role])]
         if src.get("weight", 1.0) > 0:
             train.append(tr)
             weights.append(float(src.get("weight", 1.0)))
@@ -117,6 +122,8 @@ def build_sources(dataset_args: dict):
         if evaluate:
             val[name] = va
             test[name] = make("test")
+            if limit.get("test"):
+                test[name].data_paths = test[name].data_paths[:int(limit["test"])]
     return WeightedConcat(train, weights, names), val, test
 
 

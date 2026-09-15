@@ -1,0 +1,43 @@
+# Data ablation on one RTX 3060 (12 GB, Windows, pure-torch kernels; utils/torch_kernels.py).
+# Measured: ~0.37 s per US window with bf16 at batch 2, peak ~5 GB. The cloud budget
+# (60k steps x 16 = 960k samples per run) would take ~4 days per run here, so each run
+# gets 14,000 optimizer steps at effective batch 8 = 112,000 samples (~12 h): about 1/9 of
+# the cloud budget, a trend check. Same for A, B and C; warmup 5%, decay over the last
+# 20% (2,800), evaluation on the held-out US projects every 2,000 steps.
+# -------------------------- log ------------------------- #
+log_level: info
+log_on_each_node: false
+logging_steps: 50
+logging_first_step: true
+report_to:
+    - tensorboard
+
+# ------------------------- train ------------------------ #
+max_steps: 14000            # same budget for A, B, C
+gradient_accumulation_steps: 4   # 2 x 4 = effective batch 8
+bf16: true
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+optim: adamw_torch
+learning_rate: 0.0001
+lr_scheduler_type: warmup_stable_decay
+warmup_ratio: 0.05
+lr_scheduler_kwargs:
+    num_decay_steps: 2800
+    min_lr_ratio: 0.1
+weight_decay: 0.05
+
+# ------------------------- eval ------------------------- #
+batch_eval_metrics: true
+eval_strategy: steps
+eval_steps: 2000
+eval_on_start: false
+
+# ------------------------- save ------------------------- #
+metric_for_best_model: us_PQ
+save_strategy: best
+
+# ------------------------- data ------------------------- #
+dataloader_num_workers: 6
+dataloader_persistent_workers: true
+dataloader_drop_last: true # TODO!: if false, the eval step will have some strange bugs, wait to fix

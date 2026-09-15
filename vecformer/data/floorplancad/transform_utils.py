@@ -1,5 +1,8 @@
 import torch
-from torch_scatter import scatter
+try:
+    from torch_scatter import scatter
+except ImportError:            # no wheel (Windows / Python 3.12): exact pure-torch scatter
+    from utils.torch_kernels import scatter
 
 from .dataclass_define import (
     SVGData,

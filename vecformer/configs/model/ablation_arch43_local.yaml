@@ -1,0 +1,20 @@
+# Data ablation model for one 12 GB GPU: model/ablation_arch43.yaml plus a cap of 6,000
+# training queries per drawing (VecFormer already samples 50-100% of primitives as
+# queries; the cap only thins the ~10% of US windows with more than 6k primitives).
+# Two 16k-primitive windows in one batch peaked at 14.9 GB without it, 8.1 GB with it.
+# Identical for runs A, B and C.
+model_name: vecformer
+model_args:
+    max_num_queries: 6000
+    num_semantic_classes: 43
+    num_instance_classes: 43
+    thing_class_idxs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 35, 36, 37, 38, 39, 40, 41, 42]
+    stuff_class_idxs: [30, 31, 32, 33, 34]
+    label_space: arch43
+    sources: [fpcad, us, cubicasa]          # = taxonomy.ANNOTATED order = data source_order
+    text_config:
+        enabled: true
+        num_types: 46
+        num_grades: 7
+    layer_name_config:
+        enabled: true        # US CAD layer names as hashed words (data use_layer_names)

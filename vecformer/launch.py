@@ -1,11 +1,19 @@
 import json
 import logging
+import os
 import warnings
 
 # ------------ apply patches at very beginning ----------- #
 from utils import apply_patches
 
 apply_patches()
+
+# ---- CUDA kernels: pure-torch replacements where flash-attn/spconv/torch_scatter are missing
+# (Windows / Python 3.12 has no wheels). On the Linux image the real kernels import and
+# nothing is replaced.
+from utils import torch_kernels
+
+_replaced = torch_kernels.install()
 
 # -------------- import installed modules ------------- #
 from transformers import TrainingArguments
@@ -39,6 +47,8 @@ def main():
 
     logger.info(
         f"Training Arguments: {json.dumps(training_args.to_dict(), indent=4)}")
+    if _replaced:
+        logger.warning(f"CUDA kernels not installed, using pure-torch replacements for: {_replaced}")
     # ----------------------- model ---------------------- #
     model, ModelTrainer = build_model(training_args.model_args_path)
     # ---------------------- dataset --------------------- #
@@ -87,6 +97,14 @@ def main():
 
 
 if __name__ == "__main__":
-    dist.init_process_group(backend="nccl")
+    # torchrun sets these; a plain `python launch.py` runs as a single process
+    for key, value in dict(RANK="0", LOCAL_RANK="0", WORLD_SIZE="1", MASTER_ADDR="127.0.0.1",
+                           MASTER_PORT="29531").items():
+        os.environ.setdefault(key, value)
+    if os.name == "nt":
+        os.environ.setdefault("USE_LIBUV", "0")       # Windows builds of torch have no libuv store
+    import torch
+    backend = "nccl" if torch.cuda.is_available() and dist.is_nccl_available() else "gloo"
+    dist.init_process_group(backend=backend)
     main()
     dist.destroy_process_group()

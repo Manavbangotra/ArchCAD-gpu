@@ -37,6 +37,9 @@ def main():
     if a.cpu:
         import cpu_kernels
         cpu_kernels.install()
+    else:
+        from utils import torch_kernels                 # exact pure-torch kernels where CUDA ones are missing
+        torch_kernels.install()
     os.chdir(VEC)                       # config paths are relative to vecformer/
     from data.multisource import build_sources
     from data.floorplancad.floorplancad import FloorPlanCAD
