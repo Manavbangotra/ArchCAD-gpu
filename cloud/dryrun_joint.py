@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--per_source", type=int, default=2)
     ap.add_argument("--max_segments", type=int, default=20000, help="skip larger samples in --cpu mode")
     a = ap.parse_args()
+    a.data, a.model = osp.abspath(a.data), osp.abspath(a.model)     # before changing into vecformer/
 
     if a.cpu:
         import cpu_kernels
@@ -95,6 +96,9 @@ def main():
               f"inst {out.dict_sublosses.get('instance_loss', torch.tensor(0)).item():.3f} "
               f"text_l0 {out.dict_sublosses.get('text_l0', torch.tensor(0)).item():.2f}")
         failures += not ok
+        if name not in val:
+            print(f"[{name}] not evaluated (evaluate: false)")
+            continue
         v = val[name]
         vb = FloorPlanCAD.collate_fn([v[i] for i in range(min(len(v), 1))])
         vb.pop("data_paths")

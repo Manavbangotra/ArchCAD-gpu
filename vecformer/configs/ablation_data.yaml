@@ -1,0 +1,40 @@
+# Data ablation (A: US only, B: US + FloorPlanCAD, C: + CubiCasa), scripts/ablation_data.sh.
+# Every run gets the same 60,000 steps at batch 16 (960,000 samples) from scratch, so
+# the question answered is "for the same GPU budget, which training mix gives the best
+# US model?". A sees ~36 passes over the US windows, B ~20, C ~16. Warmup 5%, decay
+# over the last 20% (12,000), evaluation on the held-out US projects every 7,500 steps;
+# best checkpoint by eval_us_PQ, then scored once on the US test split.
+# -------------------------- log ------------------------- #
+log_level: info
+log_on_each_node: false
+logging_steps: 200
+logging_first_step: true
+report_to:
+    - tensorboard
+
+# ------------------------- train ------------------------ #
+max_steps: 60000            # same budget for A, B, C (overrides epochs)
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+optim: adamw_torch_fused
+learning_rate: 0.0001
+lr_scheduler_type: warmup_stable_decay
+warmup_ratio: 0.05
+lr_scheduler_kwargs:
+    num_decay_steps: 12000
+    min_lr_ratio: 0.1
+weight_decay: 0.05
+
+# ------------------------- eval ------------------------- #
+batch_eval_metrics: true
+eval_strategy: steps
+eval_steps: 7500
+eval_on_start: false
+
+# ------------------------- save ------------------------- #
+metric_for_best_model: us_PQ
+save_strategy: best
+
+# ------------------------- data ------------------------- #
+dataloader_num_workers: 64
+dataloader_drop_last: true # TODO!: if false, the eval step will have some strange bugs, wait to fix

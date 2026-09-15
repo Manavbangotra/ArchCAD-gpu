@@ -18,6 +18,10 @@ CubiCasa5K), each a FloorPlanCAD-format dataset.
               weight: 0.45
               val_from_train: {docs: 3, seed: 0}   # no val directory: hold out whole documents
               splits: {test: test}  # split directory per role (default: same name)
+            - name: cubicasa
+              root_dir: ../dataset/cubicasa5k/lines_arch43
+              weight: 0.2
+              evaluate: false       # train on it, but no val/test set (saves evaluation time)
         source_order: []            # must equal the model config's `sources`; empty = ANNOTATED order
 
 Training draws samples with replacement so each source contributes its `weight`
@@ -96,7 +100,10 @@ def build_sources(dataset_args: dict):
             return ds
 
         holdout = src.get("val_from_train")
-        if holdout:
+        evaluate = bool(src.get("evaluate", True))
+        if not evaluate:
+            tr, va = make("train"), None
+        elif holdout:
             tr, va = make("train"), make("train")
             va.split = "val"
             tr.data_paths, va.data_paths = holdout_docs(tr.data_paths, int(holdout.get("docs", 1)),
@@ -107,8 +114,9 @@ def build_sources(dataset_args: dict):
             train.append(tr)
             weights.append(float(src.get("weight", 1.0)))
             names.append(name)
-        val[name] = va
-        test[name] = make("test")
+        if evaluate:
+            val[name] = va
+            test[name] = make("test")
     return WeightedConcat(train, weights, names), val, test
 
 

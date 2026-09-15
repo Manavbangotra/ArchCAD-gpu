@@ -80,6 +80,7 @@ def main():
         trainer._load_from_checkpoint(training_args.resume_from_checkpoint)
         metrics = trainer.evaluate()
         trainer.log_metrics("eval", metrics)
+        trainer.save_metrics("test", metrics)       # <output_dir>/test_results.json, read by tools/ablation_report.py
     # ---------------------------------------------------- #
     if training_args.launch_mode not in ["train", "continue", "test"]:
         raise ValueError(f"Invalid launch mode: {training_args.launch_mode}")

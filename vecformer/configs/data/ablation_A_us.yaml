@@ -1,0 +1,28 @@
+# Data ablation, run A: US plan windows only. Same model (model/ablation_arch43.yaml), same
+# steps (ablation_data.yaml), same held-out US projects; only the training mix differs.
+# Weights keep the product ratio fpcad : us : cubicasa = 0.35 : 0.45 : 0.2 among the
+# sources present.
+dataset_name: multisource
+dataset_args:
+    source_order: [fpcad, us, cubicasa]
+    common:
+        use_text: true
+        use_layer_names: true
+        layer_name_dropout: 0.5     # half the training drawings without names: geometry must suffice
+        train_transform_args:
+            random_vertical_flip: 0.5
+            random_horizontal_flip: 0.5
+            random_rotate: true
+            random_scale: [0.8, 1.2]
+            random_translation: [0.1, 0.1]
+        eval_transform_args:
+            random_vertical_flip: 0.0
+            random_horizontal_flip: 0.0
+            random_rotate: false
+            random_scale: [1.0, 1.0]
+            random_translation: [0.0, 0.0]
+    sources:
+        - name: us
+          root_dir: ../dataset/us_plans/lines
+          weight: 1.0
+          val_from_train: {docs: 3, seed: 0}    # identical held-out projects in A, B and C

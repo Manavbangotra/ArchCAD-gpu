@@ -92,6 +92,31 @@ torchrun --nproc_per_node=8 launch.py --launch_mode train --config_path configs/
 Evaluation is per source: `eval_fpcad_PQ`, `eval_us_PQ`, `eval_cubicasa_PQ` (+ strict). Best checkpoint by
 US PQ. **Gate:** FloorPlanCAD PQ within 2 of Phase 3.
 
+## 6b. Data ablation - US only vs US + FloorPlanCAD vs + CubiCasa
+Decides which corpora the product model trains on. Three runs, identical except the training mix:
+same model **from scratch** (no warm start: a FloorPlanCAD checkpoint would leak into the US-only run),
+same 60,000 steps at batch 16, same 3 held-out US projects for checkpoint selection, then one US test
+evaluation each.
+
+| Run | Data config | Mix (sampling weights) |
+|---|---|---|
+| A | `configs/data/ablation_A_us.yaml` | US 1.0 |
+| B | `configs/data/ablation_B_us_fpcad.yaml` | FloorPlanCAD 0.4375, US 0.5625 |
+| C | `configs/data/ablation_C_all.yaml` | FloorPlanCAD 0.35, US 0.45, CubiCasa 0.2 |
+
+Needs `dataset/us_plans/lines`, and for B/C `vecformer/datasets/FloorPlanCAD-V2-textcad` (section 5 data
+steps), for C `dataset/cubicasa5k/lines_arch43`.
+```bash
+cd vecformer
+MAX_STEPS=20000 bash scripts/ablation_data.sh        # optional cheap trend check first (~1/3 the cost)
+bash scripts/ablation_data.sh                        # A, B, C in turn: dry run, train, test on US
+python ../tools/ablation_report.py outputs/ablation_data --out outputs/ablation_data/report.md
+```
+The report lists best/last validation US PQ per run, test PQ / strict PQ / F1, and per-class test PQ.
+Budget: ~100-150 GPU-hours per full run on 8x A100 (to be confirmed by the smoke test's step time).
+Decision rule: take the best test PQ; a gap under ~1 PQ is noise, so rerun the top two with
+`--seed 1` before dropping a corpus.
+
 ## 7. Checkpoints off the machine
 Credentials from the environment only (rotate the keys that were pasted in chat earlier):
 ```bash

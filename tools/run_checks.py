@@ -42,6 +42,7 @@ CHECKS = [
     ("vecformer layer-name embedding", "vecformer/checks/test_layer_names.py", True),
     ("takeoff sliding-window aggregation", "takeoff/test_swa.py", True),
     ("takeoff with the window model (CPU kernels)", "takeoff/test_vecformer_takeoff.py", True),
+    ("data ablation report", "tools/test_ablation_report.py", True),
     ("corrections reach the loader", "dataset/test_corrections.py", True),
     ("loader/editor/weights agree", "dataset/test_merge_agreement.py", True),
     ("set loss over target rows", "tools/test_set_loss.py", True),

@@ -87,6 +87,14 @@ def main():
         check(len(s2.train) + len(s2.val["us"]) == 20 and len(s2.val["us"]) > 0 and s2.val["us"].split == "val"
               and len(s2.test["us"]) == 3, f"val_from_train: {len(s2.train)} train, {len(s2.val['us'])} val")
 
+        args3 = dict(args, sources=[dict(name="fpcad", root_dir=fp, weight=0.4, evaluate=False),
+                                    dict(name="us", root_dir=us, weight=0.6, val_from_train=dict(docs=1))])
+        s3, _ = build(args3)
+        check(sorted(s3.val) == ["us"] and sorted(s3.test) == ["us"] and len(s3.train) == 4 + len(s2.train),
+              "evaluate: false trains on a source without val/test sets")
+        check(s3.val["us"].data_paths == s2.val["us"].data_paths,
+              "the US validation files do not depend on which other sources are mixed in")
+
         fake = types.SimpleNamespace(train_dataset=train, args=types.SimpleNamespace(seed=3))
         sampler = VecFormerTrainer._get_train_sampler(fake)
         draws = []
