@@ -38,7 +38,7 @@ class Decoder(nn.Module):
         self.num_heads = cfg.num_heads
         self.num_queries = cfg.num_queries
 
-        self.vision_dim = cfg.vision.dim
+        self.vision_dim = int(cfg.vision.dim) if getattr(cfg, "vision", None) else 0
     
     
         # PARAMETRIC QUERIES
@@ -55,8 +55,9 @@ class Decoder(nn.Module):
     ########################################################
 
         #self.pi_fusion = PI_Fusion(img_dim=self.vision_dim, point_dim=self.planes[0], feature_dim=self.planes[0])
-        self.pi_fusion = Atten_Fusion_Conv(inplanes_I = self.vision_dim, inplanes_P = self.planes[0],\
-                                           outplanes = self.planes[0]+self.vision_dim)
+        # no image branch (vision.dim 0, e.g. a released SymPointV2 checkpoint): no fusion
+        self.pi_fusion = Atten_Fusion_Conv(inplanes_I=self.vision_dim, inplanes_P=self.planes[0],
+                                           outplanes=self.planes[0] + self.vision_dim) if self.vision_dim else None
 
         self.mask_features_head = nn.Sequential(
             nn.Linear(planes[0]+self.vision_dim, cfg.hidden_dim),
@@ -309,7 +310,8 @@ class Decoder(nn.Module):
         # PLAN-2: Fusion1
         
         batch_offsets = stage_list["inputs"]["offset"]  # tensor([ 2048,  4901,  6949, 11000], device='cuda:0', dtype=torch.int32)
-        fusion_features = self.pi_fusion(img_embed, fusion_features, batch_offsets)  # (N,64) + (N,64) -> (N,64)
+        if self.pi_fusion is not None:
+            fusion_features = self.pi_fusion(img_embed, fusion_features, batch_offsets)  # (N,64) + (N,64) -> (N,64)
 
         #import pdb
         #print("fusion_features", fusion_features.shape)  

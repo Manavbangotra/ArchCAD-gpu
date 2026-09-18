@@ -25,7 +25,11 @@ HEADLINE = [("PQ", "PQ"), ("strict_PQ", "strict PQ"), ("thing_PQ", "thing PQ"), 
 
 
 def load_run(run_dir):
-    states = sorted(glob.glob(osp.join(run_dir, "checkpoint-*", "trainer_state.json")), key=osp.getmtime)
+    full = osp.join(run_dir, "trainer_state.json")          # written by launch.py after training
+    if osp.isfile(full):
+        states = [full]
+    else:
+        states = sorted(glob.glob(osp.join(run_dir, "checkpoint-*", "trainer_state.json")), key=osp.getmtime)
     history = json.load(open(states[-1]))["log_history"] if states else []
     evals = [h for h in history if "eval_us_PQ" in h]
     best = max(evals, key=lambda h: h["eval_us_PQ"]) if evals else None

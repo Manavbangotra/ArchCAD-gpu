@@ -38,6 +38,9 @@ metric_for_best_model: us_PQ
 save_strategy: best
 
 # ------------------------- data ------------------------- #
-dataloader_num_workers: 6
-dataloader_persistent_workers: true
+# Windows spawns each loader worker as a full Python with torch loaded (~2 GB committed
+# each); persistent workers for training plus new sets per evaluation exhausted the page
+# file (27 workers, >50 GB). Two non-persistent workers keep it under ~8 GB.
+dataloader_num_workers: 2
+dataloader_persistent_workers: false
 dataloader_drop_last: true # TODO!: if false, the eval step will have some strange bugs, wait to fix

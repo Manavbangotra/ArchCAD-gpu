@@ -406,10 +406,18 @@ def main():
     stale = 0
     prev_best = best_metric
 
+    # eval_freq N: validate every N epochs (and always on the last one). Validation
+    # over a large test split costs as much as a fraction of an epoch; on a short
+    # fine-tune it is worth spending that less often.
+    eval_freq = max(1, int(getattr(cfg, "eval_freq", 1)))
     for epoch in range(start_epoch, cfg.epochs + 1):
         train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger, writer)
         if scheduler is not None:scheduler.step()
-        score = validate(epoch, model, optimizer, val_loader, cfg, logger, writer)
+        if epoch % eval_freq == 0 or epoch == cfg.epochs:
+            score = validate(epoch, model, optimizer, val_loader, cfg, logger, writer)
+        else:
+            score = None
+            logger.info(f"Epoch {epoch}: validation skipped (eval_freq {eval_freq})")
         writer.flush()
 
         if patience > 0 and score is not None:

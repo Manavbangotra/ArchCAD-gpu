@@ -28,7 +28,10 @@ class SVGNet(nn.Module):
         super().__init__()
         self.criterion = criterion
 
-        self.image_embed = ImgEmbed(cfg) #
+        # vision.dim 0 (or no vision block) = point-only model, as released SymPointV2
+        # checkpoints are built; the image branch and its fusion are then not created.
+        self.use_image = bool(getattr(cfg, "vision", None)) and int(cfg.vision.dim) > 0
+        self.image_embed = ImgEmbed(cfg) if self.use_image else None
 
 
         # NOTE backbone
@@ -160,7 +163,7 @@ class SVGNet(nn.Module):
         meta=None,
     ):
 
-        img_embed = self.image_embed(imgs, centers) #
+        img_embed = self.image_embed(imgs, centers) if self.use_image else None
 
         stage_list={'inputs': {'p_out':coords,"f_out":feats,"offset":offsets},"semantic_labels":semantic_labels[:,0]}
         targets = self.prepare_targets(semantic_labels, meta=meta)

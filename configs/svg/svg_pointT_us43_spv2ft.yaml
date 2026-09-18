@@ -1,0 +1,187 @@
+# Fine-tune the released SymPointV2 checkpoint (FloorPlanCAD, point-only) on the US
+# plan tiles in the Arch-43 label space.
+#
+# Matching the checkpoint: no image branch (vision.dim 0) and 500 queries, so the
+# backbone, decoder and query bank all load. The classifier head is 44-wide here
+# against the checkpoint's 36; tools/finetune_spv2.py copies the 35 FloorPlanCAD rows
+# plus background into it (Arch-43 ids 0-34 are FloorPlanCAD's, in order) and leaves
+# the 8 US-only classes freshly initialised.
+#
+# Everything else -- class weights, coarse policy, augmentation, schedule -- is
+# svg_pointT_us43_3060.yaml unchanged.
+model:
+  in_channels: 10
+  semantic_classes: 43
+  use_layer_fusion: False
+  num_decoders: 3
+  dropout: 0.1
+  pre_norm: False
+  num_heads: 8
+  shared_decoder: True
+  dim_feedforward: 512
+  hidden_dim: 256
+  num_queries: 500        # the checkpoint's query bank
+  gauss_scale: 1.0
+  normalize_pos_enc: False
+  scalar: 1
+  dn_mask_noise_scale: 0.0
+  dn_label_noise_ratio: 0.2
+  vision:
+    dim: 0                 # point-only, as the released SymPointV2 checkpoint is built
+
+matcher:
+  cost_class: 2.
+  cost_mask: 7.
+  cost_dice: 5.
+  num_points: -1
+
+criterion:
+  num_classes: 43
+  eos_coef: 0.05
+  losses:
+    - "labels"
+    - "masks"
+  ignore_label: -1
+  # 43 sqrt-inverse-frequency weights, normalised to mean 1 and clipped.
+  # -1 means unweighted, which is correct only for a smoke test: background
+  # is ~86% of primitives and rises under this taxonomy, and calling
+  # everything background is the cheapest move available to the model. That
+  # is how the earlier CubiCasa run collapsed. criterion.py asserts the list
+  # is exactly num_classes long, so a stale 3-entry list fails loudly.
+  class_weights: [0.475, 0.475, 0.475, 0.475, 0.475, 0.475, 0.314, 1.0, 1.0, 1.0, 0.845, 0.845, 0.845, 0.845, 0.845, 0.845, 0.3, 3.301, 0.3, 3.301, 3.301, 0.3, 0.3, 3.301, 0.3, 0.3, 0.3, 0.391, 2.172, 1.0, 1.0, 5.0, 0.3, 1.0, 0.662, 0.498, 1.384, 0.685, 0.3, 0.941, 0.881, 0.452, 0.3]
+  # Measured: tools/corpus_weights.py --root dataset/us_plans/json5 --split train
+  # 900 tiles, 6.1M primitives, sqrt-inverse frequency, mean 1, clipped 0.3-5.0.
+  # Classes with no support here get 1.0, which provably does not matter:
+  # F.cross_entropy weights by the target class, and a class that is never a
+  # target never contributes.
+  num_points: -1
+  contrast:
+    num_classes: 44
+    stage: "Ua"
+    num_layers: 5
+    ftype: "f_out"
+    dist: "l2"
+    pos: "cnt"
+    contrast_func: "softnn"
+    sample: "label"
+    temperature: 2.0
+    weight: 8.0
+
+data:
+  train:
+    img_size: 700
+    type: 'svg'
+    num_classes: 43
+    data_root: 'dataset/us_plans/json5'
+    repeat: 1
+    split: "train"
+    # canonical, not bg.
+    #
+    # A CAD layer says "door" but not which of the six subtypes, so those
+    # primitives carry the coarse door-any id. Under coarse_policy: bg they read
+    # as background -- which would make this 43-class run WORSE at doors than the
+    # 3-class one it replaces, since the old taxonomy at least had a single
+    # "door" class. Same for A-FLOR-PFIX (fixture-any) and I-FURN
+    # (furniture-any); between them that is 5.7% of primitives.
+    #
+    # canonical assigns the group's modal member, so a US door trains as "single
+    # door". That is a real bias -- every double and sliding door in this corpus
+    # is labelled single -- and it is still better than teaching the model that
+    # doors are empty space. The honest fix is the marginal loss
+    # (-log sum of the group's probabilities), after which this becomes "keep".
+    coarse_policy: "canonical"
+    data_norm: "mean"
+    aug:
+      aug_prob: 0.3
+      hflip: True
+      vflip: True
+      color: True
+      rotate:
+        enable: False
+        angle: [-180,180]
+      rotate2: False
+      scale:
+        enable: False
+        ratio: [0.5,1.5]
+      shift:
+        enable: False
+        scale: [-0.5,0.5]
+      cutmix:
+        enable: False
+        queueK: 4
+        relative_shift: [-0.5,0.5]
+
+  test:
+    img_size: 700
+    type: 'svg'
+    num_classes: 43
+    data_root: 'dataset/us_plans/json5'
+    repeat: 1
+    split: "test"
+    # canonical, not bg.
+    #
+    # A CAD layer says "door" but not which of the six subtypes, so those
+    # primitives carry the coarse door-any id. Under coarse_policy: bg they read
+    # as background -- which would make this 43-class run WORSE at doors than the
+    # 3-class one it replaces, since the old taxonomy at least had a single
+    # "door" class. Same for A-FLOR-PFIX (fixture-any) and I-FURN
+    # (furniture-any); between them that is 5.7% of primitives.
+    #
+    # canonical assigns the group's modal member, so a US door trains as "single
+    # door". That is a real bias -- every double and sliding door in this corpus
+    # is labelled single -- and it is still better than teaching the model that
+    # doors are empty space. The honest fix is the marginal loss
+    # (-log sum of the group's probabilities), after which this becomes "keep".
+    coarse_policy: "canonical"
+    data_norm: "mean"
+    aug: False
+
+dataloader:
+  train:
+    batch_size: 2
+    num_workers: 4
+  test:
+    batch_size: 2
+    num_workers: 2
+
+optimizer:
+  type: 'AdamW'
+  lr: 0.00002            # fine-tuning: a tenth of from-scratch
+  weight_decay: 0.1
+  weight_decay_embed: 0.1
+  decoder_multiplier: 1.0
+  clip_gradients_enabled: True
+  clip_gradients_type: "full_model"
+  clip_gradients_norm_type: 2.0
+  clip_gradients_value: 2.0
+
+scheduler:
+  type: 'cosine'
+  warmup_epochs: 1
+  min_lr: 1e-7
+
+fp16: True
+eval_freq: 2             # validate every 2 epochs (the US test split is ~3.6k tiles)
+epochs: 10
+step_epoch: 2
+save_freq: 1             # keep a checkpoint every epoch
+save_interval_iters: 500
+# Stage-1 CubiCasa checkpoint. tools/train.py loads it non-strict and skips
+# size-mismatched tensors, so the backbone transfers even if the head differs.
+# No pretrain by default. The CubiCasa and US checkpoints on disk are 3-class:
+# their class_embed_head and label_enc are the wrong shape, and
+# svgnet/util/utils.py drops size-mismatched tensors *silently*, so pointing
+# at one here would look like it worked while throwing the classifier away.
+# A FloorPlanCAD 35-class checkpoint is the one worth warm-starting from --
+# ids 1-35 mean the same thing in both taxonomies.
+pretrain: './work_dirs/us43_spv2ft/spv2_arch43_init.pth'
+work_dir: './work_dirs/us43_spv2ft'
+
+# batch 2 x 8 = effective 16, matching the learning rate above.
+accumulate_steps: 8
+
+# Stop when mIoU stops improving rather than always running 60 epochs.
+early_stop:
+  metric: miou
+  patience: 4
+  min_delta: 0.1

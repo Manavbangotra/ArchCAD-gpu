@@ -72,9 +72,13 @@ PY
     python ../cloud/dryrun_joint.py --data "$data" --model "$MODEL_CFG"
     MASTER_PORT=$((29500 + RANDOM % 100)) "${LAUNCH[@]}" launch.py --launch_mode train --config_path "$TRAIN_CFG" --model_args_path "$MODEL_CFG" --data_args_path "$data" --run_name "ablation_$r" --save_total_limit 2 --output_dir "$run" 2>&1 | tee "$OUT/$r.train.log"
     best=$(python - "$run" <<'PY'
-import glob, json, os, sys
-states = sorted(glob.glob(os.path.join(sys.argv[1], "checkpoint-*", "trainer_state.json")), key=os.path.getmtime)
-print(json.load(open(states[-1]))["best_model_checkpoint"] if states else "")
+import json, os, sys
+run = sys.argv[1]
+state = os.path.join(run, "trainer_state.json")
+best = json.load(open(state)).get("best_model_checkpoint") if os.path.isfile(state) else None
+final = os.path.join(run, "checkpoint-final")
+# no improvement over the first evaluation (e.g. PQ still 0 in a short run): test the final weights
+print(best if best and os.path.isdir(best) else (final if os.path.isdir(final) else ""))
 PY
 )
     [ -n "$best" ] || { echo "run $r: no best checkpoint found"; exit 1; }

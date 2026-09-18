@@ -69,6 +69,10 @@ def main():
             logger.info(f"Resuming from checkpoint: {checkpoint}")
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.log_metrics("train", train_result.metrics)
+        # full evaluation history (checkpoint copies stop at their own step) and the final
+        # weights: save_strategy "best" saves nothing when the metric never improves
+        trainer.save_state()
+        trainer.save_model(os.path.join(training_args.output_dir, "checkpoint-final"))
     # ------------------ continue train ------------------ #
     if training_args.launch_mode == "continue":
         if training_args.resume_from_checkpoint is None:

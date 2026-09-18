@@ -1,0 +1,32 @@
+# Released SymPointV2 checkpoint (point-only, FloorPlanCAD 35 classes, 500 queries).
+# Matches the architecture of the published best.pth: no image branch (vision.dim 0),
+# layer-feature fusion on. FloorPlanCAD class ids 0..34 are Arch-43 ids 0..34
+# (dataset/taxonomy.py band A), so predictions map straight onto the takeoff classes.
+model:
+  in_channels: 10
+  semantic_classes: 35
+  num_decoders: 3
+  dropout: 0.0
+  pre_norm: False
+  num_heads: 8
+  shared_decoder: True
+  dim_feedforward: 512
+  hidden_dim: 256
+  num_queries: 500
+  gauss_scale: 1.0
+  normalize_pos_enc: False
+  use_layer_fusion: True
+  vision:
+    dim: 0
+  scalar: 1
+  dn_mask_noise_scale: 0.0
+  dn_label_noise_ratio: 0.2
+
+data:
+  test:
+    type: 'svg'
+    img_size: 700
+    data_norm: "mean"
+    aug: False
+
+fp16: False
