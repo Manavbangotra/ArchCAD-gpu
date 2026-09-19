@@ -410,7 +410,22 @@ def main():
     # over a large test split costs as much as a fraction of an epoch; on a short
     # fine-tune it is worth spending that less often.
     eval_freq = max(1, int(getattr(cfg, "eval_freq", 1)))
+    # freeze_backbone_epochs N: train only the decoder and heads for the first N
+    # epochs. Fine-tuning a pretrained backbone against a fresh head lets the head's
+    # early noise wreck features that already work; warming the head first keeps them.
+    freeze_epochs = int(getattr(cfg, "freeze_backbone_epochs", 0))
+
+    def set_backbone_trainable(flag):
+        target = model.module if hasattr(model, "module") else model
+        for name, param in target.named_parameters():
+            if name.startswith("backbone."):
+                param.requires_grad = flag
+
     for epoch in range(start_epoch, cfg.epochs + 1):
+        if freeze_epochs:
+            frozen = epoch <= freeze_epochs
+            set_backbone_trainable(not frozen)
+            logger.info(f"Epoch {epoch}: backbone {'frozen (head warm-up)' if frozen else 'training'}")
         train(epoch, model, optimizer, scheduler, scaler, train_loader, cfg, logger, writer)
         if scheduler is not None:scheduler.step()
         if epoch % eval_freq == 0 or epoch == cfg.epochs:

@@ -171,7 +171,7 @@ class SVGDataset(Dataset):
                  repeat=1, split_path=None, num_classes=NUM_CLASSES, logger=None,
                  use_corrections=True, coarse_policy="bg", source=None, annotated=None,
                  stuff_classes=None, index_base=0, max_samples=0, file_list=None,
-                 max_prims=0):
+                 max_prims=0, min_objects=0):
         self.data_root = data_root
         self.split = split
         self.data_norm = data_norm
@@ -227,6 +227,20 @@ class SVGDataset(Dataset):
             if logger is not None and len(kept) != len(self.data_list):
                 logger.info(f"  {source or data_root}: dropped {len(self.data_list) - len(kept)} "
                             f"drawings over {max_prims} primitives")
+            self.data_list = kept
+
+        # Drop drawings with fewer than `min_objects` labelled objects. On the US
+        # tiles 85% of drawings carry none at all (sheet margins, details, schedules,
+        # notes): training on them teaches "predict nothing", which is exactly the
+        # collapse the first SymPointV2 fine-tune produced (mIoU 1.65, PQ 0, no
+        # predictions at all). Counts are cached beside the corpus, keyed by split,
+        # because the scan opens every file once.
+        if min_objects:
+            counts = self._object_counts(data_root, split, logger)
+            kept = [p for p in self.data_list if counts.get(osp.basename(p), 0) >= int(min_objects)]
+            if logger is not None:
+                logger.info(f"  {source or data_root}: kept {len(kept)} of {len(self.data_list)} drawings "
+                            f"with at least {min_objects} labelled objects")
             self.data_list = kept
 
         # A fixed, evenly spaced subset -- for per-epoch validation on a sample
@@ -343,6 +357,32 @@ class SVGDataset(Dataset):
             if 0 <= i < num:
                 sem[i] = int(v)
         return sem
+
+    def _object_counts(self, data_root, split, logger=None):
+        """{file name: number of (semantic, instance) objects}, cached on disk."""
+        cache = osp.join(data_root, f".object_counts_{split}.json")
+        if osp.isfile(cache):
+            with open(cache) as f:
+                return json.load(f)
+        if logger is not None:
+            logger.info(f"  counting labelled objects in {len(self.data_list)} drawings (cached afterwards)")
+        counts = {}
+        for path in self.data_list:
+            try:
+                with open(path) as f:
+                    d = json.load(f)
+                sem, ins = d.get("semanticIds", []), d.get("instanceIds", [])
+                bg = self.num_classes
+                counts[osp.basename(path)] = len({(int(s), int(i)) for s, i in zip(sem, ins)
+                                                  if int(s) != bg and int(s) < 51 and int(i) >= 0})
+            except Exception:
+                counts[osp.basename(path)] = 0
+        try:
+            with open(cache, "w") as f:
+                json.dump(counts, f)
+        except OSError:
+            pass
+        return counts
 
     @staticmethod
     def load(data_root=None, file_name=None, idx=0, min_points=2048,
